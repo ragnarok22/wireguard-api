@@ -48,10 +48,11 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # This ensures compatibility with the OS of the final image.
 
 # Install dependencies for python (if needed by the base OS)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# linuxserver/wireguard is base on Alpine
+RUN apk add --no-cache \
+    python3 \
     curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates
 
 # Copy uv from the builder image
 COPY --from=builder /uv /usr/local/bin/uv
