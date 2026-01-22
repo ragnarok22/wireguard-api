@@ -1,17 +1,27 @@
-[tool.poetry]
+[project]
 name = "wireguard-api"
-version = "0.1.0"
+version = "0.2.0"
 description = "VPN node based in Wireguard with an API exposed to receive commands"
-authors = ["Carlos Lugones <contact@lugodev.com>", "Reinier Hernández <sasuke.reinier@gmail.com>"]
-
-[tool.poetry.dependencies]
-python = "^3.8"
-fastapi = "^0.66.0"
-uvicorn = {extras = ["standard"], version = "^0.14.0"}
-python-dotenv = "^0.19.0"
-
-[tool.poetry.dev-dependencies]
+authors = [
+    {name = "Carlos Lugones", email = "contact@lugodev.com"},
+    {name = "Reinier Hernández", email = "sasuke.reinier@gmail.com"},
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.9.0",
+]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
