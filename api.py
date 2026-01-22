@@ -1,16 +1,15 @@
 import os
 import subprocess
-from typing import Annotated
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 
 # We load the env vars from a .env file
 load_dotenv()
 
 # Token uses by master to send commands to this node
-TOKEN = os.getenv('API_TOKEN')
+TOKEN = os.getenv("API_TOKEN")
 
 
 class Command(BaseModel):
@@ -26,10 +25,9 @@ async def run_command(command: Command) -> dict[str, str]:
     if command.token != TOKEN:
         # Using 403 Forbidden for invalid token
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid authentication token"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid authentication token"
         )
-    
+
     try:
         # Note: shell=True is dangerous but required for this specific use case
         # as per legacy functionality.
@@ -37,7 +35,7 @@ async def run_command(command: Command) -> dict[str, str]:
             command.command,
             shell=True,
             stderr=subprocess.STDOUT,
-            text=True  # Ensure output is string, not bytes
+            text=True,  # Ensure output is string, not bytes
         )
         return {"status": output.strip()}
     except subprocess.CalledProcessError as e:
