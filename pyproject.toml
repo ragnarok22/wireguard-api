@@ -32,4 +32,6 @@ ignore = []
 [dependency-groups]
 dev = [
     "ruff>=0.14.13",
+    "pytest>=8.3.0",
+    "httpx>=0.27.2",
 ]
