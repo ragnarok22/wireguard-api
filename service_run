@@ -5,4 +5,11 @@ cd /app
 GATEWAY=$(ip route show | grep 'link src' | awk '{print $1}' | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')
 ip route add default via $GATEWAY || true
 
+# Wait for WireGuard interface to be ready
+echo "Waiting for wg0 interface..."
+while ! ip link show wg0 > /dev/null 2>&1; do
+    sleep 1
+done
+echo "wg0 interface found!"
+
 exec /app/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8008
