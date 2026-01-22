@@ -55,7 +55,7 @@ RUN apk add --no-cache \
     ca-certificates
 
 # Copy uv from the builder image
-COPY --from=builder /uv /usr/local/bin/uv
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 
 WORKDIR /app
 
