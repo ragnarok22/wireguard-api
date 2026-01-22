@@ -46,6 +46,43 @@ async def get_token_header(x_api_token: Annotated[str, Depends(header_scheme)]):
         )
 
 
+def _get_server_endpoint() -> str:
+    """
+    Retrieves SERVER_ENDPOINT from env and ensures it has a port.
+    Defaults to 51820 if port is missing.
+    """
+    endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
+    
+    # Simple check for port: look for colon
+    # Note: IPv6 addresses contain colons, so this is simplistic but works for host:port
+    # A robust check would require parsing.
+    # Assumption: if it has no colon, it needs port.
+    # If it has colon but it's IPv6 (brackets?), we need care.
+    # Standard format: [ipv6]:port or ipv4:port or domain:port
+    
+    if "]:" in endpoint:
+        # IPv6 with port
+        return endpoint
+    
+    # Count colons to distinguish IPv6 from IPv4/Domain with port
+    colons = endpoint.count(":")
+    
+    if colons == 0:
+        # Domain or IPv4 without port
+        return f"{endpoint}:51820"
+    
+    if colons > 1 and "]" not in endpoint:
+        # Naked IPv6 address without brackets/port? WireGuard expects [IPv6]:port
+        # If user provided raw naked IPv6, we assume they meant that as host.
+        # But technically we cannot easily distinguish domain with port (rare cols) 
+        # from raw IPv6. 
+        # For safety/simplicity: assume existing env is mostly correct, 
+        # just fix the obvious "missing port" case for IPv4/Domains.
+        pass
+
+    return endpoint
+
+
 # --- Models ---
 
 
@@ -155,7 +192,7 @@ async def create_peer(peer: PeerCreate, format: str = "json"):
             except Exception as e:
                 logger.warning(f"Could not fetch server public key: {e}")
 
-        server_endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
+        server_endpoint = _get_server_endpoint()
 
         # Taking the first allowed IP as the Interface Address (usually /32)
         # If multiple are passed, we might just list them or take first.
@@ -233,7 +270,7 @@ async def get_peer_config(public_key: str):
         except Exception as e:
             logger.warning(f"Could not fetch server public key: {e}")
 
-    server_endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
+    server_endpoint = _get_server_endpoint()
 
     config = f"""
 # Client config (partial) - Add your PrivateKey to [Interface]
