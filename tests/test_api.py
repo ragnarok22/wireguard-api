@@ -1,10 +1,29 @@
 import importlib
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+class FakeWireGuard:
+    def __init__(self, peers=None, gen_keys_return=("priv", "pub")):
+        self.peers = peers or {}
+        self.gen_keys_return = gen_keys_return
+        self.created = []
+        self.deleted = []
+
+    def list_peers(self):
+        return self.peers
+
+    def create_peer(self, pub_key, allowed_ips):
+        self.created.append((pub_key, allowed_ips))
+
+    def delete_peer(self, public_key):
+        self.deleted.append(public_key)
+
+    def gen_keys(self):
+        return self.gen_keys_return
 
 
 @pytest.fixture()
@@ -22,29 +41,75 @@ def client(api_module):
     return TestClient(api_module.app)
 
 
+@pytest.fixture()
+def auth_headers():
+    return {"X-API-Token": "secret-token"}
+
+
 def test_rejects_invalid_token(client):
-    response = client.post("/", json={"token": "wrong", "command": "echo hi"})
+    response = client.get("/peers", headers={"X-API-Token": "wrong"})
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Invalid authentication token"
 
 
-def test_executes_command(monkeypatch, api_module, client):
-    monkeypatch.setattr(api_module.subprocess, "check_output", lambda *_, **__: "ok\n")
+def test_lists_peers(client, api_module, auth_headers):
+    peer_data = {
+        "preshared_key": "psk",
+        "endpoint": "10.0.0.2:51820",
+        "allowed_ips": ["10.0.0.2/32"],
+        "latest_handshake": "100",
+        "transfer_rx": "0",
+        "transfer_tx": "0",
+        "persistent_keepalive": "off",
+    }
+    api_module.wg = FakeWireGuard(peers={"pub1": peer_data.copy()})
 
-    response = client.post("/", json={"token": "secret-token", "command": "echo ok"})
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
-def test_returns_error_output(monkeypatch, api_module, client):
-    def fail(cmd, *_, **__):
-        raise subprocess.CalledProcessError(returncode=1, cmd=cmd, output="boom")
-
-    monkeypatch.setattr(api_module.subprocess, "check_output", fail)
-
-    response = client.post("/", json={"token": "secret-token", "command": "echo boom"})
+    response = client.get("/peers", headers=auth_headers)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "Error: boom"}
+    assert response.json() == [{**peer_data, "public_key": "pub1"}]
+
+
+def test_get_peer_returns_peer(client, api_module, auth_headers):
+    peer_data = {
+        "preshared_key": "psk",
+        "endpoint": "10.0.0.2:51820",
+        "allowed_ips": ["10.0.0.2/32"],
+        "latest_handshake": "100",
+        "transfer_rx": "0",
+        "transfer_tx": "0",
+        "persistent_keepalive": "off",
+    }
+    api_module.wg = FakeWireGuard(peers={"pub1": peer_data.copy()})
+
+    response = client.get("/peers/pub1", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {**peer_data, "public_key": "pub1"}
+
+
+def test_creates_peer_with_generated_keys(client, api_module, auth_headers):
+    fake = FakeWireGuard(gen_keys_return=("privkey", "pubkey"))
+    api_module.wg = fake
+
+    response = client.post(
+        "/peers", headers=auth_headers, json={"allowed_ips": ["10.0.0.3/32"]}
+    )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "public_key": "pubkey",
+        "allowed_ips": ["10.0.0.3/32"],
+        "private_key": "privkey",
+    }
+    assert fake.created == [("pubkey", ["10.0.0.3/32"])]
+
+
+def test_delete_peer_not_found(client, api_module, auth_headers):
+    api_module.wg = FakeWireGuard(peers={})
+
+    response = client.delete("/peers/missing", headers=auth_headers)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Peer not found"

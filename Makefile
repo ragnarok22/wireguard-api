@@ -1,4 +1,4 @@
-.PHONY: install format lint run
+.PHONY: install format lint run test
 
 install:
 	uv sync
@@ -12,3 +12,6 @@ lint:
 
 run:
 	uv run uvicorn api:app --reload
+
+test:
+	uv run pytest
