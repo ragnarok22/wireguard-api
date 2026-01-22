@@ -1,90 +1,51 @@
 # wireguard-api
 
-VPN node based in Wireguard with an API exposed to receive commands.
-
 [![Release](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml)
 [![Publish Docker image](https://github.com/ragnarok22/wireguard-api/actions/workflows/public-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/public-docker.yml)
 [![GitHub Package](https://github.com/ragnarok22/wireguard-api/actions/workflows/github-publish.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/github-publish.yml)
+![GitHub contributors](https://img.shields.io/github/contributors/ragnarok22/wireguard-api)
+
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
+## What is this?
+FastAPI service that lets an authenticated client execute WireGuard management commands on a host. Designed to run alongside a WireGuard node (ports 51820/udp for VPN traffic and 8008/tcp for the API). Use on trusted hosts; commands run with `shell=True`.
+
 ## Installation
+### Containers
+- GitHub Container Registry: `docker pull ghcr.io/ragnarok22/wireguard-api:main`
+- Docker Hub: `docker pull ragnarok22/wireguard-api`
 
-Pull the image from GitHub Container Registery:
-
+Run with the required capabilities and environment variables:
 ```bash
-docker pull ghcr.io/lugodev/wireguard-api:main
-```
-
-Or from Docker Hub:
-
-```bash
-docker pull lugodev/wireguard-api
-```
-
-## Run the container
-
-Run the container, providing the environment vars and the volume to store the VPN configurations:
-
-```
 docker run -d \
-    --name=wireguard_api \
-    --cap-add=NET_ADMIN \
-    --cap-add=SYS_MODULE \
-    -e API_TOKEN=Your token \
-    -e PUID=1000 \
-    -e PGID=1000 \
-    -e TZ=Europe/London \
-    -e SERVERURL=wireguard.domain.com `#optional` \
-    -e SERVERPORT=51820 `#optional` \
-    -e PEERS=1 `#optional` \
-    -e PEERDNS=auto `#optional` \
-    -e INTERNAL_SUBNET=10.13.13.0 `#optional` \
-    -e ALLOWEDIPS=0.0.0.0/0 `#optional` \
-    -p 51820:51820/udp \
-    -p 8008:8008 \
-    -v /wireguard-api:/config \
-    -v /lib/modules:/lib/modules \
-    --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
-    --restart unless-stopped \
-    ghcr.io/lugodev/wireguard-api:main
+  --name=wireguard_api \
+  --cap-add=NET_ADMIN --cap-add=SYS_MODULE \
+  -e API_TOKEN=your_token \
+  -p 51820:51820/udp -p 8008:8008 \
+  -v /wireguard-api:/config -v /lib/modules:/lib/modules \
+  --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
+  ghcr.io/ragnarok22/wireguard-api:main
 ```
 
-The env vars:
-* `API_TOKEN`: the token you pass to the API when sending commands via HTTP requests.
-* `SERVERURL`: your VPN hostname.
+Compose example (uses `compose.yaml`): `API_TOKEN=changeme API_PORT=8008 VPN_PORT=51820 docker compose up --build`.
 
-The volume `/wireguard-api` holds the VPN configurations, map the folder you'd like in your folders structure.
-
-## Ports exposed
-
-The container exposes two ports, which must be allowed in your firewall in order to receive traffic.
-
-* `51820`: WireGuard protocol.
-* `8008`: WireGuard API.
-
-Allow the ports:
-
+### Local development
+Requires Python 3.13 and [uv](https://github.com/astral-sh/uv):
 ```bash
-ufw allow 51820
-ufw allow 8008
-ufw reload
+make install       # sync dependencies
+make run           # uvicorn api:app --reload on :8008
+make lint | make format
 ```
 
 ## Usage
-
-An easy way to communicate your WireGuard server with your UI. Just make a post request to root route with the token key and the command. Example:
-
+Send POST requests to `/` with `token` and `command`:
 ```bash
-curl --request POST http://wireguard_api -d 'token=my_token&command=my_command'
+curl -X POST http://localhost:8008/ \
+  -d 'token=your_token&command=wg show'
 ```
-
-Examples:
-
-```BASH
-curl --request POST http://myvpn.com:8008/ -d 'token=my_token&command=wg set wg0 peer 6DVHXzbM0TfPr6Q4yDBtA/A0jzdUXu8XqR+yV2vF1F9= remove'
-```
+Invalid tokens return 403. Responses include command output under `status`. Avoid passing untrusted strings to `command`.
 
 ## Contributors ✨
 
@@ -105,7 +66,3 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
-
-<p align="center">
-    <img src="http://ForTheBadge.com/images/badges/made-with-python.svg">
-</p>
