@@ -26,6 +26,9 @@ services:
     environment:
       - API_TOKEN=${API_TOKEN:-default_token_change_me}
       - API_PORT=${API_PORT:-8008}
+      - SERVER_PUBLIC_KEY=${SERVER_PUBLIC_KEY:-SERVER_PUB_KEY_PLACEHOLDER}
+      - SERVER_ENDPOINT=${SERVER_ENDPOINT:-vpn.example.com:51820}
+      - WG_INTERFACE=${WG_INTERFACE:-wg0}
     restart: unless-stopped
 
 networks:
