@@ -68,7 +68,10 @@ curl -X POST http://localhost:8008/peers \
   -H "Content-Type: application/json" \
   -d '{"allowed_ips": ["10.13.13.2/32"]}'
 ```
-*If `public_key` is omitted, one will be generated and returned (along with the private key).*
+  -d '{"allowed_ips": ["10.13.13.2/32"]}'
+```
+*If `public_key` is omitted, one will be generated.*
+*If `allowed_ips` is omitted, the next available IP in the subnet will be automatically allocated.*
 
 ### Create Peer (One-Liner Config)
 To generate a ready-to-use WireGuard configuration file directly:
@@ -76,7 +79,7 @@ To generate a ready-to-use WireGuard configuration file directly:
 curl -X POST "http://localhost:8008/peers?format=config" \
   -H "X-API-Token: your_secret_token" \
   -H "Content-Type: application/json" \
-  -d '{"allowed_ips": ["10.13.13.2/32"]}' > client.conf
+  -d '{}' > client.conf
 ```
 
 ### Get Peer Details

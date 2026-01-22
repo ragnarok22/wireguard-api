@@ -135,3 +135,25 @@ def test_creates_peer_with_config_format(client, api_module, auth_headers):
     assert "[Peer]" in content
     assert "PublicKey = SERVER_PUB_KEY_PLACEHOLDER" in content
     assert fake.created == [("pubkey", ["10.0.0.3/32"])]
+
+
+def test_creates_peer_auto_allocation(client, api_module, auth_headers):
+    fake = FakeWireGuard(gen_keys_return=("privkey", "pubkey"))
+
+    # Mock subnet and used IPs
+    # Mock subnet and used IPs on the instance mock
+
+    fake.get_interface_subnet = lambda: "10.0.0.1/24"
+    fake.allocate_next_ip = lambda subnet, used: "10.0.0.2"
+
+    api_module.wg = fake
+
+    # Create without allowed_ips
+    response = client.post("/peers", headers=auth_headers, json={})
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["public_key"] == "pubkey"
+    assert data["allowed_ips"] == ["10.0.0.2/32"]
+
+    assert fake.created == [("pubkey", ["10.0.0.2/32"])]

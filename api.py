@@ -65,8 +65,8 @@ class PeerCreate(BaseModel):
         None,
         description="Public key of the peer. If not provided, one will be generated.",
     )
-    allowed_ips: list[str] = Field(
-        ..., description="List of allowed IPs for this peer."
+    allowed_ips: list[str] | None = Field(
+        None, description="Allowed IPs. If None, one will be allocated automatically."
     )
 
 
@@ -103,6 +103,31 @@ async def create_peer(peer: PeerCreate, format: str = "json"):
 
     if not pub_key:
         priv_key, pub_key = wg.gen_keys()
+
+    if not peer.allowed_ips:
+        try:
+            # 1. Get current subnet (e.g. 10.13.13.1/24)
+            subnet = wg.get_interface_subnet()
+            # 2. Get list of used IPs from existing peers
+            peers = wg.list_peers()
+            used_ips = set()
+            for p in peers.values():
+                # Each peer has a list of allowed_ips (str) like "10.0.0.2/32,..."
+                for ip_cidr in p.get("allowed_ips", []):
+                    # Store just the IP part, ignoring /32
+                    used_ips.add(ip_cidr.split("/")[0])
+
+            # 3. Allocate next
+            new_ip = wg.allocate_next_ip(subnet, used_ips)
+            # Assign as /32 (single host)
+            peer.allowed_ips = [f"{new_ip}/32"]
+            logger.info(f"Allocated new IP {new_ip} for peer {pub_key}")
+
+        except WireGuardError as e:
+            logger.error(f"Failed to allocate IP: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"IP Allocation failed: {e}"
+            ) from e
 
     try:
         wg.create_peer(pub_key, peer.allowed_ips)

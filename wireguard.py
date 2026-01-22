@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import subprocess
 
@@ -103,3 +104,45 @@ class WireGuard:
             raise WireGuardError(f"Failed to generate pubkey: {stderr}")
 
         return priv_key.strip(), pub_key.strip()
+
+    def get_interface_subnet(self) -> str:
+        """
+        Returns the subnet CIDR of the WireGuard interface (e.g., "10.13.13.1/24").
+        """
+        # ip -o -f inet addr show <interface>
+        try:
+            output = self._run(
+                ["ip", "-o", "-f", "inet", "addr", "show", self.interface]
+            )
+            # Parse CIDR from output
+            # Split by whitespace, find the part with '/'
+            for part in output.split():
+                if "/" in part:
+                    return part
+            raise WireGuardError(f"Could not find CIDR in output: {output}")
+        except Exception as e:
+            raise WireGuardError(
+                f"Failed to get subnet for {self.interface}: {e}"
+            ) from e
+
+    def allocate_next_ip(self, subnet_cidr: str, used_ips: set[str]) -> str:
+        """
+        Finds the next available IP in the subnet.
+        """
+        try:
+            network = ipaddress.ip_network(subnet_cidr, strict=False)
+        except ValueError as e:
+            raise WireGuardError(f"Invalid subnet CIDR: {subnet_cidr}") from e
+
+        # Host iterator (excludes network address and broadcast address)
+        for ip in network.hosts():
+            ip_str = str(ip)
+            # Check if this IP is the assigned interface IP (gateway for peers)
+            server_ip = subnet_cidr.split("/")[0]
+            if ip_str == server_ip:
+                continue
+
+            if ip_str not in used_ips:
+                return ip_str
+
+        raise WireGuardError("No available IPs in subnet")
