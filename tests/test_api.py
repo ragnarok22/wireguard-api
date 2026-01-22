@@ -113,3 +113,25 @@ def test_delete_peer_not_found(client, api_module, auth_headers):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Peer not found"
+
+
+def test_creates_peer_with_config_format(client, api_module, auth_headers):
+    fake = FakeWireGuard(gen_keys_return=("privkey", "pubkey"))
+    api_module.wg = fake
+
+    response = client.post(
+        "/peers",
+        params={"format": "config"},
+        headers=auth_headers,
+        json={"allowed_ips": ["10.0.0.3/32"]},
+    )
+
+    assert response.status_code == 201
+    assert response.headers["content-type"].startswith("text/plain")
+    content = response.text
+    assert "[Interface]" in content
+    assert "PrivateKey = privkey" in content
+    assert "Address = 10.0.0.3/32" in content
+    assert "[Peer]" in content
+    assert "PublicKey = SERVER_PUB_KEY_PLACEHOLDER" in content
+    assert fake.created == [("pubkey", ["10.0.0.3/32"])]

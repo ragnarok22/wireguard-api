@@ -4,7 +4,7 @@ from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
@@ -95,8 +95,9 @@ async def list_peers():
     "/peers",
     dependencies=[Depends(get_token_header)],
     status_code=status.HTTP_201_CREATED,
+    response_model=None,
 )
-async def create_peer(peer: PeerCreate):
+async def create_peer(peer: PeerCreate, format: str = "json"):
     priv_key = None
     pub_key = peer.public_key
 
@@ -108,6 +109,37 @@ async def create_peer(peer: PeerCreate):
     except WireGuardError as e:
         logger.error(f"Failed to create peer: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if format == "config":
+        if not priv_key:
+            # We can't generate full config if we didn't generate the keys
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot generate config when public_key is provided. Private key is unknown.",
+            )
+
+        server_pub_key = os.getenv("SERVER_PUBLIC_KEY", "SERVER_PUB_KEY_PLACEHOLDER")
+        server_endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
+
+        # Taking the first allowed IP as the Interface Address (usually /32)
+        # If multiple are passed, we might just list them or take first.
+        # Standard WireGuard config takes 'Address'.
+        address = peer.allowed_ips[0]
+
+        config_content = f"""[Interface]
+PrivateKey = {priv_key}
+Address = {address}
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = {server_pub_key}
+Endpoint = {server_endpoint}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+"""
+        return Response(
+            content=config_content, media_type="text/plain", status_code=201
+        )
 
     return PeerResponse(
         public_key=pub_key, allowed_ips=peer.allowed_ips, private_key=priv_key

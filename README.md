@@ -71,6 +71,15 @@ curl -X POST http://localhost:8008/peers \
 ```
 *If `public_key` is omitted, one will be generated and returned (along with the private key).*
 
+### Create Peer (One-Liner Config)
+To generate a ready-to-use WireGuard configuration file directly:
+```bash
+curl -X POST "http://localhost:8008/peers?format=config" \
+  -H "X-API-Token: your_secret_token" \
+  -H "Content-Type: application/json" \
+  -d '{"allowed_ips": ["10.13.13.2/32"]}' > client.conf
+```
+
 ### Get Peer Details
 ```bash
 curl -X GET http://localhost:8008/peers/<PUBLIC_KEY> \
