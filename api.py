@@ -115,7 +115,10 @@ async def create_peer(peer: PeerCreate, format: str = "json"):
             # We can't generate full config if we didn't generate the keys
             raise HTTPException(
                 status_code=400,
-                detail="Cannot generate config when public_key is provided. Private key is unknown.",
+                detail=(
+                    "Cannot generate config when public_key is provided. "
+                    "Private key is unknown."
+                ),
             )
 
         server_pub_key = os.getenv("SERVER_PUBLIC_KEY", "SERVER_PUB_KEY_PLACEHOLDER")
