@@ -44,10 +44,10 @@ docker run -d \
 
 Environment Variables:
 * `API_TOKEN`: Secret token for authentication (Header `X-API-Token`).
+* `API_PORT`: (Optional) Port where the API listens inside the container. Defaults to `8008`.
 * `SERVER_PUBLIC_KEY`: Public key of the server interface (used for client config generation).
 * `SERVER_ENDPOINT`: (Optional) Full endpoint `host:port` for client config. Defaults to `vpn.example.com:51820`.
 * `WG_INTERFACE`: (Optional) WireGuard interface to manage. Defaults to `wg0`.
-* `API_PORT`: (Optional) Port where the API listens inside the container. Defaults to `8008`.
 * `VPN_PORT`: (Optional) Port where WireGuard listens. Defaults to `51820`.
 
 ## Usage
