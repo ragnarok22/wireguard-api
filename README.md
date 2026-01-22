@@ -122,7 +122,3 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
-
-<p align="center">
-    <img src="http://ForTheBadge.com/images/badges/made-with-python.svg">
-</p>
