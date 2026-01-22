@@ -34,6 +34,12 @@ if ! ip link show wg0 > /dev/null 2>&1; then
     
     ip link set up dev wg0
     echo "wg0 bootstrapped successfully!"
+    
+    # Enable NAT/Masquerading to access internet
+    echo "Enabling NAT..."
+    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+    iptables -A FORWARD -i wg0 -j ACCEPT
+    iptables -A FORWARD -o wg0 -j ACCEPT
 fi
 
 exec /app/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8008
