@@ -9,8 +9,18 @@ ip route add default via $GATEWAY || true
 if ! ip link show wg0 > /dev/null 2>&1; then
     echo "wg0 interface not found. Bootstrapping new WireGuard server..."
     
-    # Generate server keys
-    PRIVATE_KEY=$(wg genkey)
+    # Check for persistent key
+    KEY_FILE="/config/server_private.key"
+    if [ -f "$KEY_FILE" ]; then
+        echo "Loading server private key from $KEY_FILE"
+        PRIVATE_KEY=$(cat "$KEY_FILE")
+    else
+        echo "Generating new server private key and saving to $KEY_FILE"
+        PRIVATE_KEY=$(wg genkey)
+        # Ensure /config exists (it should, as a volume)
+        mkdir -p /config
+        echo "$PRIVATE_KEY" > "$KEY_FILE"
+    fi
     
     # Create interface manually
     ip link add dev wg0 type wireguard
