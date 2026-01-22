@@ -65,12 +65,12 @@ COPY pyproject.toml uv.lock ./
 # Install dependencies directly in the final image 
 # (using cache mount to speed it up if built locally with buildkit)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-dev --python=/usr/bin/python3
 
 # Copy application code
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --python=/usr/bin/python3
 
 # S6-Overlay service configuration
 COPY service_run /etc/services.d/api/run
