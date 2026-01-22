@@ -1,3 +1,6 @@
 #!/usr/bin/with-contenv sh
 cd /app
+# Restore default gateway if missing (linuxserver/wireguard might strip it)
+ip route add default via 172.20.0.1 || true
+
 exec /app/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8008
