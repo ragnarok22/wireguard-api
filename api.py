@@ -3,7 +3,8 @@ import os
 from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,17 @@ WG_INTERFACE = os.getenv("WG_INTERFACE", "wg0")
 
 app = FastAPI(title="Wireguard API", version="0.3.0")
 wg = WireGuard(interface=WG_INTERFACE)
+
+
+# --- Exception Handlers ---
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error"},
+    )
+
 
 # --- Dependencies ---
 header_scheme = APIKeyHeader(name="X-API-Token")
@@ -94,6 +106,7 @@ async def create_peer(peer: PeerCreate):
     try:
         wg.create_peer(pub_key, peer.allowed_ips)
     except WireGuardError as e:
+        logger.error(f"Failed to create peer: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     return PeerResponse(
@@ -126,6 +139,7 @@ async def delete_peer(public_key: str):
     try:
         wg.delete_peer(public_key)
     except WireGuardError as e:
+        logger.error(f"Failed to delete peer: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
     return None
 
