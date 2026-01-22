@@ -1,51 +1,107 @@
 # wireguard-api
 
+VPN node based in Wireguard with a RESTful API exposed to manage peers.
+
 [![Release](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml)
 [![Publish Docker image](https://github.com/ragnarok22/wireguard-api/actions/workflows/public-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/public-docker.yml)
 [![GitHub Package](https://github.com/ragnarok22/wireguard-api/actions/workflows/github-publish.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/github-publish.yml)
-![GitHub contributors](https://img.shields.io/github/contributors/ragnarok22/wireguard-api)
-
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-## What is this?
-FastAPI service that lets an authenticated client execute WireGuard management commands on a host. Designed to run alongside a WireGuard node (ports 51820/udp for VPN traffic and 8008/tcp for the API). Use on trusted hosts; commands run with `shell=True`.
-
 ## Installation
-### Containers
-- GitHub Container Registry: `docker pull ghcr.io/ragnarok22/wireguard-api:main`
-- Docker Hub: `docker pull ragnarok22/wireguard-api`
 
-Run with the required capabilities and environment variables:
+### Run with Docker Compose (Recommended)
+
+This project uses a modern `compose.yaml` configuration.
+
+1. Create a `compose.yaml` (or clone the repo):
+   ```yaml
+   # See compose.yaml in the repo
+   ```
+
+2. Run the stack:
+   ```bash
+   API_TOKEN=your_token docker compose up --build
+   ```
+
+### Run with Docker
+
 ```bash
 docker run -d \
-  --name=wireguard_api \
-  --cap-add=NET_ADMIN --cap-add=SYS_MODULE \
-  -e API_TOKEN=your_token \
-  -p 51820:51820/udp -p 8008:8008 \
-  -v /wireguard-api:/config -v /lib/modules:/lib/modules \
-  --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
-  ghcr.io/ragnarok22/wireguard-api:main
+    --name=wireguard_api \
+    --cap-add=NET_ADMIN \
+    --cap-add=SYS_MODULE \
+    -e API_TOKEN=your_secret_token \
+    -e SERVERURL=vpn.yourdomain.com \
+    -p 51820:51820/udp \
+    -p 8008:8008 \
+    -v /lib/modules:/lib/modules \
+    --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
+    --restart unless-stopped \
+    ghcr.io/lugodev/wireguard-api:main
 ```
 
-Compose example (uses `compose.yaml`): `API_TOKEN=changeme API_PORT=8008 VPN_PORT=51820 docker compose up --build`.
-
-### Local development
-Requires Python 3.13 and [uv](https://github.com/astral-sh/uv):
-```bash
-make install       # sync dependencies
-make run           # uvicorn api:app --reload on :8008
-make lint | make format
-```
+Environment Variables:
+* `API_TOKEN`: Secret token for authentication (Header `X-API-Token`).
+* `SERVERURL`: Your VPN hostname (used for client config generation).
+* `SERVER_PUBLIC_KEY`: Public key of the server interface (used for client config generation).
 
 ## Usage
-Send POST requests to `/` with `token` and `command`:
+
+The API is RESTful and served on port `8008`.
+Authentication is done via the `X-API-Token` header.
+
+### List Peers
 ```bash
-curl -X POST http://localhost:8008/ \
-  -d 'token=your_token&command=wg show'
+curl -X GET http://localhost:8008/peers \
+  -H "X-API-Token: your_secret_token"
 ```
-Invalid tokens return 403. Responses include command output under `status`. Avoid passing untrusted strings to `command`.
+
+### Create Peer
+```bash
+curl -X POST http://localhost:8008/peers \
+  -H "X-API-Token: your_secret_token" \
+  -H "Content-Type: application/json" \
+  -d '{"allowed_ips": ["10.13.13.2/32"]}'
+```
+*If `public_key` is omitted, one will be generated and returned (along with the private key).*
+
+### Get Peer Details
+```bash
+curl -X GET http://localhost:8008/peers/<PUBLIC_KEY> \
+  -H "X-API-Token: your_secret_token"
+```
+
+### Get Peer Config
+Returns a partial config block for the client.
+```bash
+curl -X GET http://localhost:8008/peers/<PUBLIC_KEY>/config \
+  -H "X-API-Token: your_secret_token"
+```
+
+### Delete Peer
+```bash
+curl -X DELETE http://localhost:8008/peers/<PUBLIC_KEY> \
+  -H "X-API-Token: your_secret_token"
+```
+
+## Development
+
+This project uses [uv](https://github.com/astral-sh/uv) for dependency management and Python 3.13.
+
+### Prerequisites
+- Python 3.13+
+- `uv` installed
+- `make`
+
+### Commands
+```bash
+make install       # Sync dependencies
+make run           # Run dev server (uvicorn)
+make lint          # Run ruff check
+make format        # Run ruff format
+```
 
 ## Contributors ✨
 
@@ -66,3 +122,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+
+<p align="center">
+    <img src="http://ForTheBadge.com/images/badges/made-with-python.svg">
+</p>
