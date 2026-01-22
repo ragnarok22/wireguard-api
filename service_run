@@ -5,11 +5,25 @@ cd /app
 GATEWAY=$(ip route show | grep 'link src' | awk '{print $1}' | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')
 ip route add default via $GATEWAY || true
 
-# Wait for WireGuard interface to be ready
-echo "Waiting for wg0 interface..."
-while ! ip link show wg0 > /dev/null 2>&1; do
-    sleep 1
-done
-echo "wg0 interface found!"
+# Bootstrap WireGuard if missing
+if ! ip link show wg0 > /dev/null 2>&1; then
+    echo "wg0 interface not found. Bootstrapping new WireGuard server..."
+    
+    # Generate server keys
+    PRIVATE_KEY=$(wg genkey)
+    
+    # Create interface manually
+    ip link add dev wg0 type wireguard
+    ip address add 10.13.13.1/24 dev wg0
+    
+    # Configure WireGuard
+    # Create a temp file for the key because `wg set` expects a file or stdin
+    echo "$PRIVATE_KEY" > /tmp/server.key
+    wg set wg0 listen-port 51820 private-key /tmp/server.key
+    rm /tmp/server.key
+    
+    ip link set up dev wg0
+    echo "wg0 bootstrapped successfully!"
+fi
 
 exec /app/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8008

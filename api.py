@@ -122,6 +122,14 @@ async def create_peer(peer: PeerCreate, format: str = "json"):
             )
 
         server_pub_key = os.getenv("SERVER_PUBLIC_KEY", "SERVER_PUB_KEY_PLACEHOLDER")
+        if server_pub_key == "SERVER_PUB_KEY_PLACEHOLDER":
+            # Try to fetch real public key from interface
+            try:
+                # wg show wg0 public-key
+                server_pub_key = wg._run(["wg", "show", WG_INTERFACE, "public-key"])
+            except Exception as e:
+                logger.warning(f"Could not fetch server public key: {e}")
+
         server_endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
 
         # Taking the first allowed IP as the Interface Address (usually /32)
@@ -192,6 +200,14 @@ async def get_peer_config(public_key: str):
     # allowed_ips = ",".join(peer_data['allowed_ips'])
 
     server_pub_key = os.getenv("SERVER_PUBLIC_KEY", "SERVER_PUB_KEY_PLACEHOLDER")
+    if server_pub_key == "SERVER_PUB_KEY_PLACEHOLDER":
+        # Try to fetch real public key from interface
+        try:
+            # wg show wg0 public-key
+            server_pub_key = wg._run(["wg", "show", WG_INTERFACE, "public-key"])
+        except Exception as e:
+            logger.warning(f"Could not fetch server public key: {e}")
+
     server_endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
 
     config = f"""
