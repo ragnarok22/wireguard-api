@@ -1,42 +1,75 @@
-FROM linuxserver/wireguard as wireguard_api
+# Build stage
+FROM ghcr.io/astral-sh/uv:latest as builder
+
+# Configure uv
+# Compile bytecode for faster startup
+ENV UV_COMPILE_BYTECODE=1 
+# Disable link mode (copy files instead of hardlinking) since we copy from builder
+ENV UV_LINK_MODE=copy 
+
+WORKDIR /app
+
+# Install dependencies
+# We use a cache mount to speed up subsequent builds
+# We copy only the lock files first to leverage layer caching
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+# Copy the application code and sync the project (if needed for package mode, or just checks)
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+
+# Final stage
+FROM linuxserver/wireguard
 
 ENV API_TOKEN ${API_TOKEN}
-# Ensure virtual env is used
-ENV VIRTUAL_ENV=/opt/venv
+ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install Python and dependencies
-# We use the deadsnakes PPA to get newer python on older ubuntu/debian bases if needed,
-# or just rely on apt if the base is new enough. 
-# linuxserver/wireguard is usually Alpine or Ubuntu. Let's assume Ubuntu/Debian based on `apt-get`.
-# We'll install `uv` to manage the python version and dependencies.
+# Install runtime dependencies (Python)
+# We need to ensure python 3.13 is available or installed. 
+# Since we are using linuxserver/wireguard, we might need to add python manually if not present,
+# BUT we should reuse the python environment from the builder if possible OR install python in the final stage.
+# However, copying a venv created with a specific python version to a different image 
+# requires the *same* python interpreter path/version.
+# A safer bet with `uv` and multi-stage across potentially different base images (uv image is chemically different from linuxserver/wireguard)
+# is to install python in the final image and `uv sync` again OR 
+# install dependencies *into* the final image using `uv`.
 
+# Let's adjust approach: 
+# 1. Install `uv` in the final image (it's a static binary, easy to copy).
+# 2. Use `uv` to install the python environment directly in the final image.
+# This ensures compatibility with the OS of the final image.
+
+# Install dependencies for python (if needed by the base OS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Copy uv from the builder image
+COPY --from=builder /uv /usr/local/bin/uv
 
-# Copy project definition
-COPY pyproject.toml /app/
 WORKDIR /app
 
-# Create virtual environment and install dependencies
-# We explicitly install python 3.12 using uv
-RUN uv venv /opt/venv --python 3.13 && \
-    uv sync --frozen --no-install-project || uv sync --no-install-project
+# Copy project files
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies directly in the final image 
+# (using cache mount to speed it up if built locally with buildkit)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
 
 # Copy application code
-COPY . /app/
-# Sync the project itself (if needed, though we just have a script)
-# Re-run sync to ensure everything is settled if we added the project as a package, 
-# but here we set `package = true` in pyproject.toml so we should install it.
-RUN uv sync --frozen || uv sync
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 EXPOSE 51820
 EXPOSE 8008
 
-# Run with the venv python
-CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8008"]
+# Run directly with the venv python
+CMD ["/app/.venv/bin/uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8008"]
