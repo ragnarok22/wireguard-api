@@ -3,8 +3,8 @@
 VPN node based in Wireguard with a RESTful API exposed to manage peers.
 
 [![Release](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml)
-[![Publish Docker image](https://github.com/ragnarok22/wireguard-api/actions/workflows/public-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/public-docker.yml)
-[![GitHub Package](https://github.com/ragnarok22/wireguard-api/actions/workflows/github-publish.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/github-publish.yml)
+[![Publish Docker image](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml)
+[![GitHub Package](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-github.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-github.yml)
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
