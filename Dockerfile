@@ -1,5 +1,8 @@
 # Build stage
-FROM ghcr.io/astral-sh/uv:latest as builder
+FROM python:3.13-slim-bookworm as builder
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Configure uv
 # Compile bytecode for faster startup
