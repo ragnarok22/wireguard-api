@@ -72,8 +72,12 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# S6-Overlay service configuration
+COPY service_run /etc/services.d/api/run
+RUN chmod +x /etc/services.d/api/run
+
 EXPOSE 51820
 EXPOSE 8008
 
-# Run directly with the venv python
-CMD ["/app/.venv/bin/uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8008"]
+# Remove default CMD as we use S6 services
+# (Base image ENTRYPOINT is /init)
