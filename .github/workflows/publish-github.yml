@@ -2,11 +2,8 @@ name: GitHub Package
 
 on:
   push:
-    branches: [ main ]
     # Publish semver tags as releases.
     tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ main ]
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -31,7 +28,6 @@ jobs:
       # https://github.com/docker/login-action
       - name: Log into registry ${{ env.REGISTRY }}
         # Only login if we are going to push (on tags)
-        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -53,6 +49,6 @@ jobs:
         with:
           context: .
           # Only push if it's not a PR AND it's a tag
-          push: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
