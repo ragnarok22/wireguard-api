@@ -8,8 +8,20 @@ VPN node based in Wireguard with a RESTful API exposed to manage peers.
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-## Installation
+## Deployment on AWS (Critical)
+> [!IMPORTANT]
+> **Source/Destination Check**: You **MUST** disable the "Source/destination check" for your EC2 instance.
+> 1. Go to AWS Console -> EC2 -> Instances -> Select Instance.
+> 2. Actions -> Networking -> Change source/destination check.
+> 3. **Stop** (Uncheck) the box and Save.
+>
+> Without this, AWS will block all VPN traffic routing through your instance.
+
+**Security Groups**:
+- **UDP 51820**: Allow Inbound from `0.0.0.0/0` (WireGuard VPN protocol).
+- **TCP 8008**: Allow Inbound from your Management IP (API access).
 
 ### Run with Docker Compose (Recommended)
 
@@ -38,6 +50,7 @@ docker run -d \
     -p 8008:8008 \
     -v /lib/modules:/lib/modules \
     --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
+    --sysctl="net.ipv4.ip_forward=1" \
     --restart unless-stopped \
     ghcr.io/lugodev/wireguard-api:main
 ```
