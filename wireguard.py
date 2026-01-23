@@ -1,5 +1,7 @@
 import ipaddress
+import json
 import logging
+import os
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -10,8 +12,18 @@ class WireGuardError(Exception):
 
 
 class WireGuard:
-    def __init__(self, interface: str = "wg0"):
+    def __init__(
+        self, interface: str = "wg0", storage_path: str = "/config/peers.json"
+    ):
         self.interface = interface
+        self.storage_path = storage_path
+        # Ensure directory exists if possible, though /config is usually a volume
+        storage_dir = os.path.dirname(self.storage_path)
+        if storage_dir and not os.path.exists(storage_dir):
+            try:
+                os.makedirs(storage_dir, exist_ok=True)
+            except OSError as e:
+                logger.warning(f"Could not create storage directory {storage_dir}: {e}")
 
     def _run(self, cmd: list[str]) -> str:
         try:
@@ -67,20 +79,28 @@ class WireGuard:
             }
         return peers
 
-    def create_peer(self, public_key: str, allowed_ips: list[str]) -> None:
+    def _add_peer_to_interface(self, public_key: str, allowed_ips: list[str]) -> None:
         """
-        Adds a peer to the interface.
+        Internal method to just run the command to add peer to interface.
         """
         ips_str = ",".join(allowed_ips)
         self._run(
             ["wg", "set", self.interface, "peer", public_key, "allowed-ips", ips_str]
         )
 
+    def create_peer(self, public_key: str, allowed_ips: list[str]) -> None:
+        """
+        Adds a peer to the interface and saves to storage.
+        """
+        self._add_peer_to_interface(public_key, allowed_ips)
+        self.save_peer_to_storage(public_key, allowed_ips)
+
     def delete_peer(self, public_key: str) -> None:
         """
-        Removes a peer.
+        Removes a peer and deletes from storage.
         """
         self._run(["wg", "set", self.interface, "peer", public_key, "remove"])
+        self.remove_peer_from_storage(public_key)
 
     def gen_keys(self) -> tuple[str, str]:
         """
@@ -146,3 +166,56 @@ class WireGuard:
                 return ip_str
 
         raise WireGuardError("No available IPs in subnet")
+
+    # --- Persistence Methods ---
+
+    def load_peers_from_storage(self) -> dict:
+        if not os.path.exists(self.storage_path):
+            return {}
+        try:
+            with open(self.storage_path) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load peers from storage: {e}")
+            return {}
+
+    def save_peer_to_storage(self, public_key: str, allowed_ips: list[str]) -> None:
+        peers = self.load_peers_from_storage()
+        peers[public_key] = {"allowed_ips": allowed_ips}
+        # We could store more meta-data here if needed
+        self._write_storage(peers)
+
+    def remove_peer_from_storage(self, public_key: str) -> None:
+        peers = self.load_peers_from_storage()
+        if public_key in peers:
+            del peers[public_key]
+            self._write_storage(peers)
+
+    def _write_storage(self, peers: dict) -> None:
+        try:
+            with open(self.storage_path, "w") as f:
+                json.dump(peers, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to write peers to storage: {e}")
+
+    def restore_peers(self) -> None:
+        """
+        Restores peers from storage to the WireGuard interface.
+        Should be called on startup.
+        """
+        logger.info(f"Restoring peers from {self.storage_path}")
+        stored_peers = self.load_peers_from_storage()
+
+        # Get currently active peers to avoid duplicates or errors
+        # But 'wg set' is generally idempotent for adding peers.
+
+        count = 0
+        for public_key, data in stored_peers.items():
+            allowed_ips = data.get("allowed_ips", [])
+            try:
+                self._add_peer_to_interface(public_key, allowed_ips)
+                count += 1
+            except WireGuardError as e:
+                logger.error(f"Failed to restore peer {public_key}: {e}")
+
+        logger.info(f"Restored {count} peers.")

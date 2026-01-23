@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from dotenv import load_dotenv
@@ -20,7 +21,20 @@ load_dotenv()
 TOKEN = os.getenv("API_TOKEN")
 WG_INTERFACE = os.getenv("WG_INTERFACE", "wg0")
 
-app = FastAPI(title="Wireguard API", version="0.3.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: restore peers
+    try:
+        wg.restore_peers()
+    except Exception as e:
+        logger.warning(
+            f"Failed to restore peers on startup (might be expected on first run): {e}"
+        )
+    yield
+
+
+app = FastAPI(title="Wireguard API", version="0.3.0", lifespan=lifespan)
 wg = WireGuard(interface=WG_INTERFACE)
 
 
