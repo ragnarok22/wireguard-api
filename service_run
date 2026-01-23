@@ -35,8 +35,14 @@ if ! ip link show wg0 > /dev/null 2>&1; then
     ip link set up dev wg0
     echo "wg0 bootstrapped successfully!"
     
-    # Enable IP forwarding
-    sysctl -w net.ipv4.ip_forward=1
+    # Enable IP forwarding if not already enabled
+    current_forward=$(cat /proc/sys/net/ipv4/ip_forward)
+    if [ "$current_forward" != "1" ]; then
+        echo "Enabling IP Forwarding..."
+        sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Failed to set ip_forward via sysctl. It might be read-only."
+    else
+        echo "IP Forwarding is ALREADY enabled (likely via Docker sysctls)."
+    fi
     
     # Enable NAT/Masquerading to access internet
     echo "Enabling NAT..."
