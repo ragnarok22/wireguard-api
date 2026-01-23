@@ -52,6 +52,8 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN apk add --no-cache \
     python3 \
     curl \
+    iptables \
+    iproute2 \
     ca-certificates
 
 # Copy uv from the builder image

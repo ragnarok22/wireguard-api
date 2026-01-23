@@ -2,8 +2,23 @@
 cd /app
 # Restore default gateway if missing (linuxserver/wireguard might strip it)
 # specific to Docker bridge networks where gateway is usually X.Y.Z.1
-GATEWAY=$(ip route show | grep 'link src' | awk '{print $1}' | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')
-ip route add default via $GATEWAY || true
+GATEWAY=$(ip route show | grep 'default' | awk '{print $3}')
+if [ -z "$GATEWAY" ]; then
+    # Fallback to guessing if default route is missing (rare in Docker)
+    GATEWAY=$(ip route show | grep 'link src' | awk '{print $1}' | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')
+    echo "No default gateway found. Trying to add default via guessed $GATEWAY"
+    ip route add default via $GATEWAY || echo "Failed to add default route"
+else
+    echo "Default gateway found: $GATEWAY"
+fi
+
+# Connectivity check
+echo "Checking internet connectivity..."
+if curl -s --connect-timeout 5 https://google.com > /dev/null; then
+    echo "Connectivity check PASSED."
+else
+    echo "Connectivity check FAILED. The container might not have internet access."
+fi
 
 # Bootstrap WireGuard if missing
 if ! ip link show wg0 > /dev/null 2>&1; then
@@ -46,9 +61,13 @@ if ! ip link show wg0 > /dev/null 2>&1; then
     
     # Enable NAT/Masquerading to access internet
     echo "Enabling NAT..."
+    # Ensure legacy tables are used if available, or just standard iptables
     iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
     iptables -A FORWARD -i wg0 -j ACCEPT
     iptables -A FORWARD -o wg0 -j ACCEPT
+
+    echo "Applied iptables rules. Current NAT rules:"
+    iptables -t nat -L -v -n
     
     echo "WireGuard Status:"
     wg show
