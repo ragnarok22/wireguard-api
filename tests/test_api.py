@@ -21,6 +21,8 @@ class FakeWireGuard:
         run_result: str | Exception = "",
         create_error: Exception | None = None,
         delete_error: Exception | None = None,
+        interface: str = "wg0",
+        list_peers_error: Exception | None = None,
     ):
         self.peers = peers or {}
         self.gen_keys_return = gen_keys_return
@@ -29,10 +31,14 @@ class FakeWireGuard:
         self.run_result = run_result
         self.create_error = create_error
         self.delete_error = delete_error
+        self.interface = interface
+        self.list_peers_error = list_peers_error
         self.created = []
         self.deleted = []
 
     def list_peers(self):
+        if self.list_peers_error:
+            raise self.list_peers_error
         return self.peers
 
     def create_peer(self, pub_key, allowed_ips):
@@ -281,3 +287,88 @@ def test_get_peer_config_not_found_returns_404(client, api_module, auth_headers)
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Peer not found"
+
+
+# --- Health Endpoint Tests ---
+
+
+def test_health_returns_200_when_healthy(client, api_module):
+    peer_data = {"transfer_rx": "100", "transfer_tx": "200", "latest_handshake": "0"}
+    api_module.wg = FakeWireGuard(peers={"peer1": peer_data, "peer2": peer_data})
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "healthy"
+    assert body["wireguard_available"] is True
+    assert body["peer_count"] == 2
+    assert body["wireguard_interface"] == "wg0"
+    assert "version" in body
+    assert "uptime_seconds" in body
+
+
+def test_health_returns_503_when_unhealthy(client, api_module):
+    api_module.wg = FakeWireGuard(list_peers_error=WireGuardError("unavailable"))
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "unhealthy"
+    assert body["wireguard_available"] is False
+    assert body["peer_count"] == 0
+
+
+def test_health_does_not_require_auth(client, api_module):
+    api_module.wg = FakeWireGuard(peers={})
+
+    # No auth headers provided
+    response = client.get("/health")
+
+    assert response.status_code == 200
+
+
+# --- Metrics Endpoint Tests ---
+
+
+def test_metrics_returns_prometheus_format(client, api_module):
+    peer_data = {
+        "transfer_rx": "1000",
+        "transfer_tx": "2000",
+        "latest_handshake": "0",
+    }
+    api_module.wg = FakeWireGuard(peers={"testpeer=": peer_data})
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+
+    content = response.text
+    assert "wireguard_peers_total" in content
+    assert "wireguard_api_requests_total" in content
+
+
+def test_metrics_does_not_require_auth(client, api_module):
+    api_module.wg = FakeWireGuard(peers={})
+
+    # No auth headers provided
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+
+
+def test_metrics_includes_peer_transfer_metrics(client, api_module):
+    peer_data = {
+        "transfer_rx": "12345",
+        "transfer_tx": "67890",
+        "latest_handshake": "0",
+    }
+    api_module.wg = FakeWireGuard(peers={"metricspeer=": peer_data})
+
+    response = client.get("/metrics")
+
+    content = response.text
+    assert "wireguard_peer_transfer_rx_bytes" in content
+    assert "wireguard_peer_transfer_tx_bytes" in content

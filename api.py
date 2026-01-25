@@ -5,10 +5,13 @@ from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.security import APIKeyHeader
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
+from health import HealthStatus, check_health
+from metrics import MetricsMiddleware, update_wireguard_metrics
 from wireguard import WireGuard, WireGuardError
 
 # Setup logging
@@ -35,6 +38,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Wireguard API", version="0.4.1", lifespan=lifespan)
+app.add_middleware(MetricsMiddleware)
 wg = WireGuard(interface=WG_INTERFACE)
 
 
@@ -95,6 +99,32 @@ def _get_server_endpoint() -> str:
         pass
 
     return endpoint
+
+
+# --- Monitoring Endpoints (no auth required) ---
+
+
+@app.get("/health", response_model=HealthStatus)
+async def health_check():
+    """
+    Health check endpoint for liveness/readiness probes.
+    Returns 200 if WireGuard is available, 503 otherwise.
+    """
+    health_status, http_code = check_health(wg, app.version)
+    return JSONResponse(content=health_status.model_dump(), status_code=http_code)
+
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Prometheus metrics endpoint.
+    Exposes request metrics and WireGuard stats.
+    """
+    update_wireguard_metrics(wg)
+    return PlainTextResponse(
+        content=generate_latest().decode("utf-8"),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 # --- Models ---
