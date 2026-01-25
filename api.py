@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Wireguard API", version="0.4.1", lifespan=lifespan)
+app = FastAPI(title="Wireguard API", version="0.4.2", lifespan=lifespan)
 app.add_middleware(MetricsMiddleware)
 wg = WireGuard(interface=WG_INTERFACE)
 
