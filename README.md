@@ -2,40 +2,45 @@
 
 VPN node based in Wireguard with a RESTful API exposed to manage peers.
 
+**What you get**
+- FastAPI service that manages WireGuard peers over HTTP.
+- Auto IP allocation when `allowed_ips` are omitted.
+- Peers persisted to `/config/peers.json` and restored on startup.
+- Public `/health` and `/metrics` endpoints for probes and Prometheus.
+- Docker/Compose flow that bootstraps `wg0`, NAT, and IP forwarding for you.
+
 [![Release](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/release.yml)
 [![Publish Docker image](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml)
 [![GitHub Package](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-github.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-github.yml)
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 ## Deployment on AWS (Critical)
 > [!IMPORTANT]
-> **Source/Destination Check**: You **MUST** disable the "Source/destination check" for your EC2 instance.
-> 1. Go to AWS Console -> EC2 -> Instances -> Select Instance.
-> 2. Actions -> Networking -> Change source/destination check.
-> 3. **Stop** (Uncheck) the box and Save.
->
-> Without this, AWS will block all VPN traffic routing through your instance.
+> Disable **Source/destination check** on the EC2 instance or routing will fail:
+> 1. AWS Console → EC2 → Instances → select instance.
+> 2. Actions → Networking → Change source/destination check.
+> 3. Uncheck the box and save.
 
-**Security Groups**:
-- **UDP 51820**: Allow Inbound from `0.0.0.0/0` (WireGuard VPN protocol).
-- **TCP 8008**: Allow Inbound from your Management IP (API access).
+**Security Groups**
+- UDP `51820`: inbound from `0.0.0.0/0` (WireGuard).
+- TCP `8008`: inbound only from your management IP (API access).
 
-### Run with Docker Compose (Recommended)
+### Run with Docker Compose (recommended)
 
-This project uses a modern `compose.yaml` configuration.
+```bash
+git clone https://github.com/ragnarok22/wireguard-api.git
+cd wireguard-api
+API_TOKEN=your_token \
+SERVER_ENDPOINT=vpn.example.com:51820 \
+docker compose up --build
+```
 
-1. Create a `compose.yaml` (or clone the repo):
-   ```yaml
-   # See compose.yaml in the repo
-   ```
-
-2. Run the stack:
-   ```bash
-   API_TOKEN=your_token docker compose up --build
-   ```
+What this does
+- Builds the app image with `uv` (Python 3.13) and linuxserver/wireguard runtime.
+- Boots `wg0` at `10.13.13.1/24`, enables NAT + IP forwarding, and restores peers from `/config/peers.json`.
+- Exposes UDP `51820` (WireGuard) and TCP `8008` (API).
 
 ### Run with Docker
 
@@ -45,28 +50,38 @@ docker run -d \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_MODULE \
     -e API_TOKEN=your_secret_token \
-    -e SERVERURL=vpn.yourdomain.com \
+    -e SERVER_ENDPOINT=vpn.yourdomain.com:51820 \
+    -e SERVER_PUBLIC_KEY="server_public_key" \
+    -e WG_INTERFACE=wg0 \
     -p 51820:51820/udp \
     -p 8008:8008 \
     -v /lib/modules:/lib/modules \
+    -v $(pwd)/config:/config \
     --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
     --sysctl="net.ipv4.ip_forward=1" \
     --restart unless-stopped \
     ghcr.io/lugodev/wireguard-api:main
 ```
 
-Environment Variables:
-* `API_TOKEN`: Secret token for authentication (Header `X-API-Token`).
-* `API_PORT`: (Optional) Port where the API listens inside the container. Defaults to `8008`.
-* `SERVER_PUBLIC_KEY`: Public key of the server interface (used for client config generation).
-* `SERVER_ENDPOINT`: (Optional) Full endpoint `host:port` for client config. Defaults to `vpn.example.com:51820`.
-* `WG_INTERFACE`: (Optional) WireGuard interface to manage. Defaults to `wg0`.
-* `VPN_PORT`: (Optional) Port where WireGuard listens. Defaults to `51820`.
+## Configuration
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `API_TOKEN` | Yes | – | Shared secret for `X-API-Token` auth on peer endpoints. |
+| `SERVER_ENDPOINT` | No | `vpn.example.com:51820` | Host:port shown in generated client configs. Missing port is auto-filled to `51820`. |
+| `SERVER_PUBLIC_KEY` | No | Fetched from interface | Server pubkey used in configs; if unset we call `wg show <interface> public-key`. |
+| `WG_INTERFACE` | No | `wg0` | WireGuard interface the API manages. |
+| `VPN_PORT` | No | `51820` | WireGuard UDP port (host & container). |
+| `API_PORT` | No | `8008` | Host-mapped API port. The app still listens on `8008` in-container. |
+
+**Persistence**
+- Peers are stored in `/config/peers.json`; mount `/config` to persist across restarts.
+- `service_run` also keeps the server private key at `/config/server_private.key`.
 
 ## Usage
 
-The API is RESTful and served on port `8008`.
-Authentication is done via the `X-API-Token` header.
+Base URL defaults to `http://localhost:8008` (inside container it always listens on `8008`).
+Peer operations require `X-API-Token: <API_TOKEN>`.
 
 ### List Peers
 ```bash
@@ -112,6 +127,28 @@ curl -X DELETE http://localhost:8008/peers/<PUBLIC_KEY> \
   -H "X-API-Token: your_secret_token"
 ```
 
+### Health (no auth)
+```bash
+curl http://localhost:8008/health | jq
+```
+Sample response:
+```json
+{
+  "status": "healthy",
+  "version": "0.4.2",
+  "uptime_seconds": 12.3,
+  "wireguard_interface": "wg0",
+  "wireguard_available": true,
+  "peer_count": 0
+}
+```
+
+### Prometheus Metrics (no auth)
+```
+curl http://localhost:8008/metrics
+```
+Exposes request metrics (`wireguard_api_requests_total`, `wireguard_api_request_duration_seconds`) and WireGuard stats (`wireguard_peers_total`, `wireguard_peer_transfer_rx_bytes`, `wireguard_peer_transfer_tx_bytes`, `wireguard_peer_last_handshake_seconds`). Scrape interval of 15–30s is typical.
+
 ## Development
 
 This project uses [uv](https://github.com/astral-sh/uv) for dependency management and Python 3.13.
@@ -127,6 +164,7 @@ make install       # Sync dependencies
 make run           # Run dev server (uvicorn)
 make lint          # Run ruff check
 make format        # Run ruff format
+make test          # Run pytest
 ```
 
 ## Contributors ✨
