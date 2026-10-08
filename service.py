@@ -17,6 +17,7 @@ from errors import (
 )
 from models import CreateResult, PeerCreate, PeerPage, PeerView, ServerView
 from settings import Settings
+from stats import VpnSample
 from storage import OperationRecord, PeerRecord, Store
 from wireguard import Snapshot, WireGuard
 
@@ -54,6 +55,14 @@ class PeerService:
         except ControlPlaneError:
             # Liveness stays available; readiness reports failure and the loop retries.
             logger.warning("Initial WireGuard reconciliation is pending")
+
+    def stats_sample(self) -> VpnSample:
+        """One serialized read of intent and a fresh kernel observation."""
+        with self._mutex, self.store.lock():
+            snapshot = self.snapshot(force=True)
+            records = tuple(self.store.list_peers())
+            pending = self.store.pending_count()
+            return VpnSample(snapshot, records, pending, time.time(), time.monotonic())
 
     @staticmethod
     def _matches(record: PeerRecord, snapshot: Snapshot) -> bool:

@@ -14,6 +14,10 @@ class StorageError(ControlPlaneError):
     code = "storage_unavailable"
 
 
+class TelemetryError(ControlPlaneError):
+    code = "telemetry_unavailable"
+
+
 class ConflictError(ControlPlaneError):
     status_code = 409
     code = "conflict"

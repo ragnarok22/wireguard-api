@@ -77,3 +77,96 @@ class ServerView(BaseModel):
 class ErrorResponse(BaseModel):
     code: str
     detail: str
+
+
+class SampleInfo(BaseModel):
+    sampled_at: float
+    age_seconds: float
+    interval_seconds: float | None
+
+
+class PeerCounts(BaseModel):
+    registered: int
+    active: int
+    pending: int
+    deleting: int
+    applied: int
+    observed: int
+    unmanaged: int
+
+
+class HandshakeSummary(BaseModel):
+    recent: int
+    never: int
+    latest_at: int | None
+    window_seconds: int
+
+
+class TrafficSummary(BaseModel):
+    scope: Literal["current_interface"] = "current_interface"
+    rx_bytes: int
+    tx_bytes: int
+    rx_bytes_per_second: float | None
+    tx_bytes_per_second: float | None
+
+
+class PoolSummary(BaseModel):
+    network: str
+    capacity: int
+    reserved: int
+    available: int
+
+
+class VpnStats(BaseModel):
+    version: str
+    uptime_seconds: float
+    sample: SampleInfo
+    peers: PeerCounts
+    handshakes: HandshakeSummary
+    traffic: TrafficSummary
+    pool: PoolSummary
+    pending_operations: int
+
+
+class CpuInfo(BaseModel):
+    source: Literal["cgroup_v1", "cgroup_v2", "unavailable"]
+    status: Literal["available", "warming_up", "unavailable"]
+    capacity_cores: float | None
+    total_usage_seconds: float | None
+    used_cores: float | None
+    usage_percent: float | None
+
+
+class MemoryInfo(BaseModel):
+    source: Literal["cgroup_v1", "cgroup_v2", "unavailable"]
+    used_bytes: int | None
+    limit_bytes: int | None
+    capacity_bytes: int | None
+    usage_percent: float | None
+
+
+class DiskInfo(BaseModel):
+    scope: Literal["data_filesystem"] = "data_filesystem"
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    usage_percent: float
+
+
+class RuntimeInfo(BaseModel):
+    os: str
+    kernel: str
+    architecture: str
+    python_version: str
+    api_version: str
+    uptime_seconds: float
+
+
+class SystemInfo(BaseModel):
+    status: Literal["available", "partial"]
+    resource_scope: Literal["current_cgroup"] = "current_cgroup"
+    sample: SampleInfo
+    cpu: CpuInfo
+    memory: MemoryInfo
+    disk: DiskInfo | None
+    runtime: RuntimeInfo
