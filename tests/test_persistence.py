@@ -1,257 +1,562 @@
-import builtins
+import base64
 import json
-import logging
+import sqlite3
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
-from wireguard import WireGuard, WireGuardError
+from errors import ConflictError, NotFoundError, StorageError
+from storage import Store
 
 
-@pytest.fixture()
-def wg(tmp_path):
-    return WireGuard(interface="wg-test", storage_path=str(tmp_path / "peers.json"))
+def key(number=1):
+    return base64.b64encode(bytes([number]) * 32).decode()
 
 
-def test_save_and_load_peers(wg):
-    wg.save_peer_to_storage("pubkey1=", ["10.0.0.2/32"])
-    wg.save_peer_to_storage("pubkey2=", ["10.0.0.3/32"])
-    stored = {
-        "pubkey1=": {"allowed_ips": ["10.0.0.2/32"]},
-        "pubkey2=": {"allowed_ips": ["10.0.0.3/32"]},
-    }
-    assert json.loads(Path(wg.storage_path).read_text()) == stored
-
-    reloaded = WireGuard(storage_path=wg.storage_path)
-    assert reloaded.load_peers_from_storage() == stored
-
-    wg.remove_peer_from_storage("pubkey1=")
-    assert reloaded.load_peers_from_storage() == {
-        "pubkey2=": {"allowed_ips": ["10.0.0.3/32"]}
-    }
+def store_at(tmp_path, **kwargs):
+    return Store(tmp_path / "peers.sqlite3", "wg0", "10.0.0.1/24", **kwargs)
 
 
-def test_create_peer_adds_interface_peer_and_persists_it(wg, monkeypatch):
-    wg.save_peer_to_storage("existing=", ["10.0.0.2/32"])
-    run = Mock(return_value="")
-    monkeypatch.setattr(wg, "_run", run)
+def test_write_denied_reports_failure_without_losing_reservation(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, operation = store.create_peer(key(), "10.0.0.2")
+    real_connect = sqlite3.connect
 
-    wg.create_peer("new=", ["10.0.0.3/32", "10.0.1.0/24"])
+    def readonly(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.execute("PRAGMA query_only = ON")
+        return connection
 
-    run.assert_called_once_with(
-        [
-            "wg",
-            "set",
-            "wg-test",
-            "peer",
-            "new=",
-            "allowed-ips",
-            "10.0.0.3/32,10.0.1.0/24",
-        ]
-    )
-    assert wg.load_peers_from_storage() == {
-        "existing=": {"allowed_ips": ["10.0.0.2/32"]},
-        "new=": {"allowed_ips": ["10.0.0.3/32", "10.0.1.0/24"]},
-    }
+    with monkeypatch.context() as patch:
+        patch.setattr("storage.sqlite3.connect", readonly)
+        with pytest.raises(StorageError):
+            store.complete_operation(operation.id)
+    assert store.get_peer(peer.id) == peer
+    assert store.get_operation(operation.id) == operation
 
 
-def test_delete_peer_removes_interface_peer_and_persisted_record(wg, monkeypatch):
-    wg.save_peer_to_storage("pubkey1=", ["10.0.0.2/32"])
-    wg.save_peer_to_storage("pubkey2=", ["10.0.0.3/32"])
-    run = Mock(return_value="")
-    monkeypatch.setattr(wg, "_run", run)
-
-    wg.delete_peer("pubkey1=")
-
-    run.assert_called_once_with(["wg", "set", "wg-test", "peer", "pubkey1=", "remove"])
-    assert wg.load_peers_from_storage() == {
-        "pubkey2=": {"allowed_ips": ["10.0.0.3/32"]}
-    }
-
-
-@pytest.mark.parametrize("operation", ["create", "delete"])
-def test_failed_interface_mutation_does_not_modify_storage(wg, monkeypatch, operation):
-    wg.save_peer_to_storage("pubkey1=", ["10.0.0.2/32"])
-    storage = Path(wg.storage_path)
-    original = storage.read_bytes()
-    monkeypatch.setattr(
-        wg, "_run", Mock(side_effect=WireGuardError("permission denied"))
-    )
-
-    with pytest.raises(WireGuardError, match="permission denied"):
-        if operation == "create":
-            wg.create_peer("new=", ["10.0.0.3/32"])
-        else:
-            wg.delete_peer("pubkey1=")
-
-    assert storage.read_bytes() == original
+def test_corrupt_legacy_is_never_overwritten_or_partially_imported(tmp_path):
+    legacy = tmp_path / "peers.json"
+    original = b'{"broken"'
+    legacy.write_bytes(original)
+    store = store_at(tmp_path, legacy_path=legacy)
+    with pytest.raises(StorageError):
+        store.initialize()
+    assert legacy.read_bytes() == original
+    legacy.write_text(json.dumps({key(): {"allowed_ips": ["10.0.0.2/32"]}}))
+    store.initialize()
+    assert len(store.list_peers()) == 1
 
 
-def test_constructor_creates_storage_directory(tmp_path):
-    storage = tmp_path / "nested" / "config" / "peers.json"
-
-    wg = WireGuard(storage_path=str(storage))
-
-    assert storage.parent.is_dir()
-    assert not storage.exists()
-    assert wg.load_peers_from_storage() == {}
-
-
-def test_constructor_accepts_storage_filename_without_parent(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    makedirs = Mock()
-    monkeypatch.setattr("wireguard.os.makedirs", makedirs)
-
-    wg = WireGuard(storage_path="peers.json")
-
-    assert wg.storage_path == "peers.json"
-    assert wg.load_peers_from_storage() == {}
-    makedirs.assert_not_called()
-
-
-def test_constructor_logs_directory_creation_failure(tmp_path, monkeypatch, caplog):
-    storage = tmp_path / "blocked" / "peers.json"
-    monkeypatch.setattr(
-        "wireguard.os.makedirs", Mock(side_effect=PermissionError("denied"))
-    )
-
-    wg = WireGuard(storage_path=str(storage))
-
-    assert wg.storage_path == str(storage)
-    assert not storage.parent.exists()
-    assert "Could not create storage directory" in caplog.text
-    assert "denied" in caplog.text
-
-
-def test_missing_storage_is_an_empty_peer_set(wg):
-    assert wg.load_peers_from_storage() == {}
-    assert not Path(wg.storage_path).exists()
-
-
-def test_corrupt_storage_is_logged_and_left_intact(wg, caplog):
-    storage = Path(wg.storage_path)
-    storage.write_text("{invalid json")
-
-    assert wg.load_peers_from_storage() == {}
-    assert "Failed to load peers from storage" in caplog.text
-    assert storage.read_text() == "{invalid json"
-
-
-def test_unreadable_storage_is_logged(wg, monkeypatch, caplog):
-    wg.save_peer_to_storage("existing=", ["10.0.0.2/32"])
-    monkeypatch.setattr(
-        "builtins.open", Mock(side_effect=PermissionError("read denied"))
-    )
-
-    assert wg.load_peers_from_storage() == {}
-    assert "Failed to load peers from storage: read denied" in caplog.text
+def test_lifecycle_durable_replay_history_and_pagination(tmp_path):
+    store = store_at(tmp_path)
+    store.initialize()
+    store.health_check()
+    assert store.pending_count() == 0
+    assert store.get_peer("missing") is None
+    assert store.get_operation("missing") is None
+    assert store.latest_operation("missing") is None
+    assert store.find_request("missing") is None
+    peer, create = store.create_peer(key(), "10.0.0.2/32", "request", "fingerprint")
+    other, other_create = store.create_peer(key(2), "10.0.0.3")
+    assert create.request_key == "request"
+    assert create.fingerprint == "fingerprint"
+    assert create.address == peer.address == "10.0.0.2"
+    assert store.find_request("request") == create
+    assert store.latest_operation(peer.id) == create
+    store.fail_operation(create.id, "kernel unavailable")
+    failed = store.get_operation(create.id)
+    assert failed.error == "kernel unavailable"
+    assert failed.status == "pending"
+    assert store.get_peer(peer.id) == peer
+    assert store.pending_count() == 2
+    ordered = sorted([peer, other], key=lambda item: item.id)
+    assert store.list_peers() == ordered
+    assert store.list_peers(limit=1) == ordered[:1]
+    assert store.list_peers(limit=0) == []
+    assert store.list_peers(after=ordered[0].id) == ordered[1:]
+    assert store.list_peers(after=ordered[-1].id, limit=1) == []
+    reopened = store_at(tmp_path)
+    reopened.initialize()
+    assert reopened.get_operation(create.id) == failed
+    assert reopened.pending_operations() == [failed, other_create]
+    reopened.complete_operation(create.id)
+    assert reopened.get_peer(peer.id).state == "active"
+    assert reopened.get_operation(create.id).error is None
+    delete = reopened.request_delete(peer.id)
+    assert delete.kind == "delete"
+    assert reopened.request_delete(peer.id) == delete
+    assert reopened.get_peer(peer.id).state == "deleting"
+    reopened.fail_operation(delete.id, "remove failed")
+    assert reopened.get_peer(peer.id).state == "deleting"
+    with pytest.raises(ConflictError):
+        reopened.create_peer(key(3), "10.0.0.2")
+    reopened.complete_operation(delete.id)
+    reopened.complete_operation(delete.id)
+    reopened.complete_operation(create.id)
+    reopened.fail_operation(delete.id, "stale failure")
+    assert reopened.get_peer(peer.id) is None
+    assert reopened.get_operation(delete.id).status == "complete"
+    assert reopened.get_operation(delete.id).error is None
+    assert reopened.latest_operation(peer.id).id == delete.id
+    assert reopened.find_request("request").id == create.id
+    replacement, _ = reopened.create_peer(key(), "10.0.0.2")
+    assert replacement.id != peer.id
+    reopened.complete_operation(delete.id)
+    assert reopened.get_peer(replacement.id) == replacement
 
 
-def test_storage_write_failure_is_logged_and_existing_data_remains(
-    wg, monkeypatch, caplog
+def test_delete_supersedes_pending_create_without_resurrection(tmp_path):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, create = store.create_peer(key(), "10.0.0.2")
+    delete = store.request_delete(peer.id)
+    assert store.pending_operations() == [delete]
+    assert store.get_operation(create.id).status == "complete"
+    store.complete_operation(create.id)
+    assert store.get_peer(peer.id).state == "deleting"
+    store.complete_operation(delete.id)
+    store.complete_operation(create.id)
+    assert store.list_peers() == []
+
+
+def test_latest_operation_follows_commit_order_after_clock_adjustment(
+    tmp_path, monkeypatch
 ):
-    wg.save_peer_to_storage("existing=", ["10.0.0.2/32"])
-    original = Path(wg.storage_path).read_bytes()
-    real_open = builtins.open
-
-    def deny_storage_write(file, mode="r", *args, **kwargs):
-        if file == wg.storage_path and mode == "w":
-            raise PermissionError("write denied")
-        return real_open(file, mode, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.open", deny_storage_write)
-
-    wg.save_peer_to_storage("new=", ["10.0.0.3/32"])
-
-    assert "Failed to write peers to storage: write denied" in caplog.text
-    assert Path(wg.storage_path).read_bytes() == original
+    store = store_at(tmp_path)
+    store.initialize()
+    monkeypatch.setattr("storage.time.time", Mock(side_effect=[1000.0, 900.0]))
+    peer, create = store.create_peer(key(), "10.0.0.2")
+    delete = store.request_delete(peer.id)
+    assert delete.created_at < create.created_at
+    assert store.latest_operation(peer.id) == delete
 
 
-@pytest.mark.parametrize("existing_storage", [True, False])
-def test_removing_unknown_peer_does_not_write_storage(wg, existing_storage):
-    storage = Path(wg.storage_path)
-    if existing_storage:
-        wg.save_peer_to_storage("existing=", ["10.0.0.2/32"])
-        original = storage.read_bytes()
-
-    wg.remove_peer_from_storage("missing=")
-
-    if existing_storage:
-        assert storage.read_bytes() == original
-    else:
-        assert not storage.exists()
-
-
-def test_restore_peers_replays_commands_without_rewriting_storage(
-    wg, monkeypatch, caplog
-):
-    wg.save_peer_to_storage("pubkey1=", ["10.0.0.2/32"])
-    wg.save_peer_to_storage("pubkey2=", ["10.0.0.3/32", "10.0.1.0/24"])
-    original = Path(wg.storage_path).read_bytes()
-    run = Mock(return_value="")
-    monkeypatch.setattr(wg, "_run", run)
-
-    with caplog.at_level(logging.INFO, logger="wireguard"):
-        wg.restore_peers()
-
-    assert run.call_args_list == [
-        call(
-            ["wg", "set", "wg-test", "peer", "pubkey1=", "allowed-ips", "10.0.0.2/32"]
-        ),
-        call(
-            [
-                "wg",
-                "set",
-                "wg-test",
-                "peer",
-                "pubkey2=",
-                "allowed-ips",
-                "10.0.0.3/32,10.0.1.0/24",
-            ]
-        ),
-    ]
-    assert "Restored 2 peers." in caplog.text
-    assert Path(wg.storage_path).read_bytes() == original
-
-
-def test_restore_continues_after_a_peer_fails(wg, monkeypatch, caplog):
-    storage = Path(wg.storage_path)
-    storage.write_text(
-        json.dumps(
-            {
-                "broken=": {"allowed_ips": ["invalid"]},
-                "working=": {"allowed_ips": ["10.0.0.3/32"]},
-                "empty=": {},
-            }
+@pytest.mark.parametrize("duplicate", ["key", "address", "request"])
+def test_unique_reservations_are_atomic(tmp_path, duplicate):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, operation = store.create_peer(key(), "10.0.0.2", "request", "fp")
+    with pytest.raises(ConflictError):
+        store.create_peer(
+            key() if duplicate == "key" else key(2),
+            "10.0.0.2" if duplicate == "address" else "10.0.0.3",
+            "request" if duplicate == "request" else "other",
         )
+    assert store.list_peers() == [peer]
+    assert store.pending_operations() == [operation]
+
+
+@pytest.mark.parametrize("method", ["request_delete", "complete_operation"])
+def test_missing_mutation_is_not_found(tmp_path, method):
+    store = store_at(tmp_path)
+    store.initialize()
+    with pytest.raises(NotFoundError):
+        getattr(store, method)("missing")
+    with pytest.raises(NotFoundError):
+        store.fail_operation("missing", "error")
+
+
+def test_migration_is_once_only_and_original_preserved(tmp_path):
+    legacy = tmp_path / "peers.json"
+    original = json.dumps(
+        {
+            key(): {"allowed_ips": ["10.0.0.2/32"]},
+            key(2): {"allowed_ips": ["10.0.0.3/32"]},
+        }
+    ).encode()
+    legacy.write_bytes(original)
+    store = store_at(tmp_path, legacy_path=legacy)
+    store.initialize()
+    peers = store.list_peers()
+    assert len(peers) == 2
+    assert all(peer.state == "pending" for peer in peers)
+    assert {op.peer_id for op in store.pending_operations()} == {p.id for p in peers}
+    assert all(op.kind == "create" for op in store.pending_operations())
+    for peer in peers:
+        store.complete_operation(store.latest_operation(peer.id).id)
+        store.complete_operation(store.request_delete(peer.id).id)
+    store_at(tmp_path, legacy_path=legacy).initialize()
+    assert store.list_peers() == []
+    assert all(store.latest_operation(p.id).kind == "delete" for p in peers)
+    assert legacy.read_bytes() == original
+    legacy.write_bytes(b"invalid, ignored after successful migration")
+    store.initialize()
+    assert store.list_peers() == []
+
+
+@pytest.mark.parametrize("initial", [None, "{}"])
+def test_missing_or_empty_legacy_is_permanently_marked(tmp_path, initial):
+    legacy = tmp_path / "peers.json"
+    if initial is not None:
+        legacy.write_text(initial)
+    store = store_at(tmp_path, legacy_path=legacy)
+    store.initialize()
+    legacy.write_text(json.dumps({key(): {"allowed_ips": ["10.0.0.2/32"]}}))
+    store.initialize()
+    assert store.list_peers() == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        [],
+        {"bad-key": {"allowed_ips": ["10.0.0.3/32"]}},
+        {key(2): []},
+        {key(2): {}},
+        {key(2): {"allowed_ips": "10.0.0.3/32"}},
+        {key(2): {"allowed_ips": []}},
+        {key(2): {"allowed_ips": ["10.0.0.3/32", "10.0.0.4/32"]}},
+        {key(2): {"allowed_ips": [42]}},
+        *[
+            {key(2): {"allowed_ips": [ip]}}
+            for ip in [
+                "10.0.0.3",
+                "10.0.0.3/24",
+                "10.1.0.3/32",
+                "10.0.0.1/32",
+                "10.0.0.0/32",
+                "10.0.0.255/32",
+                "::1/32",
+                "nonsense/32",
+                "10.0.0.2/32",
+            ]
+        ],
+    ],
+)
+def test_invalid_migration_rejects_entire_inventory(tmp_path, invalid):
+    legacy = tmp_path / "peers.json"
+    inventory = {key(): {"allowed_ips": ["10.0.0.2/32"]}}
+    if isinstance(invalid, dict):
+        inventory.update(invalid)
+    else:
+        inventory = invalid
+    original = json.dumps(inventory).encode()
+    legacy.write_bytes(original)
+    store = store_at(tmp_path, legacy_path=legacy)
+    with pytest.raises(StorageError):
+        store.initialize()
+    assert legacy.read_bytes() == original
+    legacy.write_text("{}")
+    store.initialize()
+    assert store.list_peers() == []
+    assert store.pending_operations() == []
+
+
+def test_duplicate_json_keys_rejected(tmp_path):
+    legacy = tmp_path / "peers.json"
+    legacy.write_text(f'{{"{key()}": {{}}, "{key()}": {{}}}}')
+    original = legacy.read_bytes()
+    with pytest.raises(StorageError):
+        store_at(tmp_path, legacy_path=legacy).initialize()
+    assert legacy.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "error", [PermissionError("private path"), UnicodeError("bad")]
+)
+def test_legacy_read_error_is_safe_and_retryable(tmp_path, monkeypatch, error):
+    legacy = tmp_path / "peers.json"
+    legacy.write_text("{}")
+    store = store_at(tmp_path, legacy_path=legacy)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", Mock(side_effect=error))
+        with pytest.raises(StorageError, match="Cannot read legacy"):
+            store.initialize()
+    assert legacy.read_text() == "{}"
+    store.initialize()
+
+
+@pytest.mark.parametrize("identity", ["interface", "server", "version", "missing"])
+def test_identity_and_schema_mismatches_rejected(tmp_path, identity):
+    store = store_at(tmp_path)
+    store.initialize()
+    if identity == "interface":
+        store = Store(store.path, "wg1", "10.0.0.1/24")
+    elif identity == "server":
+        store = Store(store.path, "wg0", "10.0.0.5/24")
+    else:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
+            connection.execute(
+                "UPDATE metadata SET version = 99"
+                if identity == "version"
+                else "DELETE FROM metadata"
+            )
+    with pytest.raises(StorageError, match="identity mismatch"):
+        store.initialize()
+    with pytest.raises(StorageError):
+        store.health_check()
+
+
+def test_corrupt_db_and_untracked_schema_rejected(tmp_path):
+    store = store_at(tmp_path)
+    store.path.write_bytes(b"not a SQLite database")
+    original = store.path.read_bytes()
+    with pytest.raises(StorageError, match="Peer storage unavailable"):
+        store.initialize()
+    assert store.path.read_bytes() == original
+    store.path.unlink()
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute("CREATE TABLE unknown (id TEXT)")
+    with pytest.raises(StorageError, match="Unrecognized"):
+        store.initialize()
+
+
+@pytest.mark.parametrize("table", ["peers", "operations"])
+def test_migration_marker_missing_with_existing_inventory_is_ambiguous(tmp_path, table):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, op = store.create_peer(key(), "10.0.0.2")
+    if table == "operations":
+        store.complete_operation(store.request_delete(peer.id).id)
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute("UPDATE metadata SET migrated = 0")
+    with pytest.raises(StorageError, match="Untracked inventory"):
+        store.initialize()
+    assert store.get_operation(op.id) is not None
+
+
+@pytest.mark.parametrize("address", ["bad", "::1/64"])
+def test_invalid_server_identity(tmp_path, address):
+    with pytest.raises(StorageError):
+        Store(tmp_path / "peers.db", "wg0", address)
+
+
+@pytest.mark.parametrize("timeout", [-1, float("nan"), float("inf")])
+def test_invalid_timeout(tmp_path, timeout):
+    with pytest.raises(StorageError):
+        store_at(tmp_path, lock_timeout=timeout)
+
+
+def test_absent_db_is_not_silently_recreated_on_read_or_write(tmp_path):
+    store = store_at(tmp_path)
+    with pytest.raises(StorageError):
+        store.list_peers()
+    with pytest.raises(StorageError):
+        store.create_peer(key(), "10.0.0.2")
+    assert not store.path.exists()
+
+
+def test_stable_reentrant_lock_and_instance_thread_exclusion(tmp_path):
+    store = store_at(tmp_path, lock_timeout=0.05)
+    contender = store_at(tmp_path, lock_timeout=0.025)
+    with ThreadPoolExecutor(max_workers=1) as executor, store.lock():
+        store.initialize()
+        lock_path = Path(str(store.path) + ".lock")
+        inode = lock_path.stat().st_ino
+        with store.lock():
+            pass
+        with pytest.raises(StorageError, match="timed out"):
+            with contender.lock():
+                pytest.fail("Must exclude another instance")
+
+        def try_lock():
+            with store.lock():
+                return True
+
+        with pytest.raises(StorageError, match="timed out"):
+            executor.submit(try_lock).result(timeout=2)
+    with contender.lock():
+        assert lock_path.stat().st_ino == inode
+    assert lock_path.stat().st_mode & 0o777 == 0o600
+    assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_lock_waits_and_recovers_from_body_exception(tmp_path):
+    store = store_at(tmp_path, lock_timeout=1)
+    contender = store_at(tmp_path, lock_timeout=1)
+    entered = threading.Event()
+
+    def try_lock():
+        entered.set()
+        with contender.lock():
+            return "acquired"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with store.lock():
+            future = executor.submit(try_lock)
+            assert entered.wait(timeout=2)
+            threading.Event().wait(0.03)
+            assert not future.done()
+        assert future.result(timeout=2) == "acquired"
+    with pytest.raises(RuntimeError):
+        with store.lock(), store.lock():
+            raise RuntimeError("service failed")
+    with contender.lock():
+        pass
+    with store.lock():
+        pass
+
+
+def test_process_lock_exclusion(tmp_path):
+    store = store_at(tmp_path)
+    code = (
+        "from pathlib import Path; from storage import Store; "
+        "s=Store(Path(__import__('sys').argv[1]),'wg0','10.0.0.1/24',"
+        "lock_timeout=0.02); "
+        "s.initialize()"
     )
-    original = storage.read_bytes()
-    run = Mock(side_effect=[WireGuardError("invalid allowed IPs"), "", ""])
-    monkeypatch.setattr(wg, "_run", run)
+    with store.lock():
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(store.path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode != 0
+        assert "StorageError: Storage lock timed out" in result.stderr
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(store.path)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
-    with caplog.at_level(logging.INFO, logger="wireguard"):
-        wg.restore_peers()
 
-    assert run.call_args_list == [
-        call(["wg", "set", "wg-test", "peer", "broken=", "allowed-ips", "invalid"]),
-        call(
-            ["wg", "set", "wg-test", "peer", "working=", "allowed-ips", "10.0.0.3/32"]
-        ),
-        call(["wg", "set", "wg-test", "peer", "empty=", "allowed-ips", ""]),
-    ]
-    assert "Failed to restore peer broken=: invalid allowed IPs" in caplog.text
-    assert "Restored 2 peers." in caplog.text
-    assert storage.read_bytes() == original
+def test_concurrent_reservation_has_one_winner(tmp_path):
+    store = store_at(tmp_path)
+    store.initialize()
+    barrier = threading.Barrier(2)
+
+    def reserve(number):
+        instance = store_at(tmp_path)
+        barrier.wait(timeout=2)
+        try:
+            return instance.create_peer(key(number), "10.0.0.2")
+        except ConflictError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, [1, 2]))
+    assert sum(result is not None for result in results) == 1
+    assert len(store.list_peers()) == store.pending_count() == 1
 
 
-def test_restore_with_no_storage_does_not_run_commands(wg, monkeypatch, caplog):
-    run = Mock()
-    monkeypatch.setattr(wg, "_run", run)
+def test_lock_io_failure_and_chmod_failure_are_reported(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr("storage.os.open", Mock(side_effect=PermissionError("secret")))
+        with pytest.raises(StorageError, match="lock unavailable"):
+            store.initialize()
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "chmod", Mock(side_effect=PermissionError("secret")))
+        with pytest.raises(StorageError, match="permissions"):
+            store.initialize()
+    store.initialize()
 
-    with caplog.at_level(logging.INFO, logger="wireguard"):
-        wg.restore_peers()
 
-    run.assert_not_called()
-    assert "Restored 0 peers." in caplog.text
-    assert not Path(wg.storage_path).exists()
+def test_deleting_record_without_intent_is_rejected(tmp_path):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, create = store.create_peer(key(), "10.0.0.2")
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute("UPDATE peers SET state = 'deleting'")
+        connection.execute("UPDATE operations SET status = 'complete'")
+    with pytest.raises(StorageError, match="no pending operation"):
+        store.request_delete(peer.id)
+    assert store.get_operation(create.id).status == "complete"
+
+
+def test_integrity_check_reports_non_ok_result(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    store.initialize()
+    real_connect = sqlite3.connect
+
+    class DamagedConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql == "PRAGMA quick_check":
+                return super().execute("SELECT 'damaged' AS integrity")
+            return super().execute(sql, *args)
+
+    def damaged(*args, **kwargs):
+        return real_connect(*args, **kwargs, factory=DamagedConnection)
+
+    monkeypatch.setattr("storage.sqlite3.connect", damaged)
+    with pytest.raises(StorageError, match="integrity check"):
+        store.health_check()
+
+
+@pytest.mark.parametrize("kind", ["create", "delete"])
+def test_commit_failure_keeps_pending_replay_and_releases_connection(
+    tmp_path, monkeypatch, kind
+):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, operation = store.create_peer(key(), "10.0.0.2")
+    if kind == "delete":
+        store.complete_operation(operation.id)
+        operation = store.request_delete(peer.id)
+        peer = store.get_peer(peer.id)
+    real_connect = sqlite3.connect
+
+    class FailedCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError("private diagnostic")
+
+    def failed(*args, **kwargs):
+        return real_connect(*args, **kwargs, factory=FailedCommit)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("storage.sqlite3.connect", failed)
+        with pytest.raises(StorageError, match="^Peer storage unavailable$"):
+            store.complete_operation(operation.id)
+    assert store.get_peer(peer.id) == peer
+    assert store.pending_operations() == [operation]
+    store.complete_operation(operation.id)
+    if kind == "create":
+        assert store.get_peer(peer.id).state == "active"
+    else:
+        assert store.get_peer(peer.id) is None
+
+
+@pytest.mark.parametrize("table", ["peers", "operations"])
+def test_unsupported_table_structure_rejected_before_use(tmp_path, table):
+    store = store_at(tmp_path)
+    store.initialize()
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN unsupported TEXT")
+    with pytest.raises(StorageError, match="Unrecognized peer storage schema"):
+        store.initialize()
+
+
+def test_migration_sql_failure_rolls_back_every_import_and_marker(
+    tmp_path, monkeypatch
+):
+    legacy = tmp_path / "peers.json"
+    original = json.dumps(
+        {
+            key(): {"allowed_ips": ["10.0.0.2/32"]},
+            key(2): {"allowed_ips": ["10.0.0.3/32"]},
+        }
+    ).encode()
+    legacy.write_bytes(original)
+    store = store_at(tmp_path, legacy_path=legacy)
+    real_connect = sqlite3.connect
+
+    class FailedImport(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith("INSERT INTO operations") and args[0][4] == key(2):
+                raise sqlite3.OperationalError("disk full")
+            return super().execute(sql, *args)
+
+    def failed(*args, **kwargs):
+        return real_connect(*args, **kwargs, factory=FailedImport)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("storage.sqlite3.connect", failed)
+        with pytest.raises(StorageError):
+            store.initialize()
+    assert legacy.read_bytes() == original
+    store.initialize()
+    assert {peer.public_key for peer in store.list_peers()} == {key(), key(2)}
+    assert len(store.pending_operations()) == 2
+    store.initialize()
+    assert len(store.list_peers()) == 2

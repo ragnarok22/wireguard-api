@@ -1,175 +1,279 @@
+import base64
 import subprocess
-from unittest.mock import Mock
+import traceback
+from dataclasses import FrozenInstanceError, asdict
+from unittest.mock import Mock, call
 
 import pytest
 
-from wireguard import WireGuard, WireGuardError
+from errors import ControlPlaneError, WireGuardError
+from wireguard import PeerStats, Snapshot, WireGuard
+
+SERVER_KEY = base64.b64encode(bytes(range(32))).decode("ascii")
+PEER_KEY = base64.b64encode(b"\xff" * 32).decode("ascii")
+OTHER_KEY = base64.b64encode(b"\xfb" * 32).decode("ascii")
+PRIVATE_KEY = base64.b64encode(b"\x01" * 32).decode("ascii")
+PSK = base64.b64encode(b"\x02" * 32).decode("ascii")
+HEADER = f"{PRIVATE_KEY}\t{SERVER_KEY}\t51820\toff\n"
+ROW = (
+    f"{PEER_KEY}\t{PSK}\t[2001:db8::1]:51820\t10.0.0.2/32,2001:db8::/64"
+    "\t1700000000\t200\t300\t25\n"
+)
 
 
 @pytest.fixture()
-def wg(tmp_path):
-    return WireGuard(interface="wg-test", storage_path=str(tmp_path / "peers.json"))
+def wg():
+    return WireGuard(interface="wg-test", timeout=1.25)
 
 
-def test_allocate_next_ip_skips_used_and_server_ip(wg):
-    assert wg.allocate_next_ip("10.0.0.1/24", {"10.0.0.2", "10.0.0.3"}) == "10.0.0.4"
+@pytest.fixture()
+def run(monkeypatch):
+    mock = Mock(return_value=subprocess.CompletedProcess([], 0, stdout=HEADER))
+    monkeypatch.setattr("wireguard.subprocess.run", mock)
+    return mock
 
 
-def test_allocate_next_ip_raises_when_full(wg):
-    with pytest.raises(WireGuardError, match="No available IPs"):
-        wg.allocate_next_ip("10.0.0.1/30", {"10.0.0.2"})
+def test_defaults_and_valid_interfaces():
+    adapter = WireGuard()
+    assert adapter.interface == "wg0"
+    assert adapter.timeout == 5.0
+    for interface in ["a", "wg.test_0-1", "a" * 15, ".wg", "_wg"]:
+        assert WireGuard(interface).interface == interface
 
 
-def test_allocate_next_ip_invalid_cidr(wg):
-    with pytest.raises(WireGuardError, match="Invalid subnet CIDR"):
-        wg.allocate_next_ip("not-a-cidr", set())
+@pytest.mark.parametrize("interface", ["", "-wg", "a" * 16, "wg/0", "wg 0", "wg\n"])
+def test_invalid_interface(interface):
+    with pytest.raises(WireGuardError, match="Invalid WireGuard interface"):
+        WireGuard(interface)
 
 
-def test_list_peers_parses_wg_dump_and_skips_invalid_rows(wg, monkeypatch):
-    dump = (
-        "private public 51820 off\n"
-        "\n"
-        "truncated= preshared endpoint\n"
-        "invalid preshared endpoint 10.0.0.9/32 0 0 0 off\n"
-        "pubkey= preshared 1.2.3.4:51820 10.0.0.2/32,10.0.0.3/32 100 200 300 off\n"
-    )
-    run = Mock(return_value=dump)
-    monkeypatch.setattr(wg, "_run", run)
-
-    assert wg.list_peers() == {
-        "pubkey=": {
-            "preshared_key": "preshared",
-            "endpoint": "1.2.3.4:51820",
-            "allowed_ips": ["10.0.0.2/32", "10.0.0.3/32"],
-            "latest_handshake": "100",
-            "transfer_rx": "200",
-            "transfer_tx": "300",
-            "persistent_keepalive": "off",
-        }
-    }
-    run.assert_called_once_with(["wg", "show", "wg-test", "dump"])
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_invalid_timeout(timeout):
+    with pytest.raises(WireGuardError, match="Invalid WireGuard timeout"):
+        WireGuard(timeout=timeout)
 
 
-def test_list_peers_returns_empty_on_error(wg, monkeypatch):
-    monkeypatch.setattr(wg, "_run", Mock(side_effect=WireGuardError("boom")))
-    assert wg.list_peers() == {}
-
-
-def test_run_uses_argument_list_and_strips_output(wg, monkeypatch):
+def test_run_uses_bounded_argument_list_and_preserves_output(wg, run):
     command = ["wg", "show", "wg-test", "dump"]
-    check_output = Mock(return_value=" \npeer data\t\n")
-    monkeypatch.setattr("wireguard.subprocess.check_output", check_output)
-
-    assert wg._run(command) == "peer data"
-    check_output.assert_called_once_with(command, stderr=subprocess.STDOUT, text=True)
-
-
-def test_run_wraps_command_failure_and_logs_output(wg, monkeypatch, caplog):
-    command = ["wg", "set", "wg-test", "peer", "pub", "remove"]
-    error = subprocess.CalledProcessError(1, command, output="Operation not permitted")
-    monkeypatch.setattr("wireguard.subprocess.check_output", Mock(side_effect=error))
-
-    with pytest.raises(WireGuardError, match="Operation not permitted") as caught:
-        wg._run(command)
-
-    assert caught.value.__cause__ is error
-    assert "Command failed" in caplog.text
-    assert "Operation not permitted" in caplog.text
-
-
-def test_run_missing_wg_show_returns_empty_output(wg, monkeypatch, caplog):
-    monkeypatch.setattr(
-        "wireguard.subprocess.check_output", Mock(side_effect=FileNotFoundError("wg"))
+    assert wg._run(command) == HEADER
+    run.assert_called_once_with(
+        command,
+        input=None,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=1.25,
+        shell=False,
     )
-
-    assert wg._run(["wg", "show", "wg-test", "dump"]) == ""
-    assert "wg command not found" in caplog.text
 
 
 @pytest.mark.parametrize(
-    "command", [["wg", "genkey"], ["ip", "addr", "show", "wg-test"]]
+    "error",
+    [
+        subprocess.CalledProcessError(1, [PRIVATE_KEY], output=PSK, stderr=PRIVATE_KEY),
+        FileNotFoundError(PRIVATE_KEY),
+        PermissionError(PRIVATE_KEY),
+        OSError(PRIVATE_KEY),
+        subprocess.TimeoutExpired([PRIVATE_KEY], 1.25, output=PSK, stderr=PRIVATE_KEY),
+    ],
 )
-def test_run_missing_mutation_or_ip_command_raises(wg, monkeypatch, command):
-    error = FileNotFoundError(command[0])
-    monkeypatch.setattr("wireguard.subprocess.check_output", Mock(side_effect=error))
+@pytest.mark.parametrize("operation", ["snapshot", "list_peers", "gen_keys"])
+def test_failed_observation_is_not_a_successful_empty_inventory(
+    wg, run, caplog, error, operation
+):
+    run.side_effect = error
+    with pytest.raises(WireGuardError, match="^WireGuard command failed$") as caught:
+        getattr(wg, operation)()
+    assert isinstance(caught.value, ControlPlaneError)
+    assert caught.value.__cause__ is None
+    rendered = "".join(traceback.format_exception(caught.value)) + caplog.text
+    assert PRIVATE_KEY not in rendered
+    assert PSK not in rendered
 
-    with pytest.raises(WireGuardError, match="WireGuard command not found") as caught:
-        wg._run(command)
 
-    assert caught.value.__cause__ is error
-
-
-def test_gen_keys_pipes_private_key_to_public_key_process(wg, monkeypatch):
-    check_output = Mock(return_value="private-key\n")
-    process = Mock(returncode=0)
-    process.communicate.return_value = ("public-key\n", "")
-    popen = Mock(return_value=process)
-    monkeypatch.setattr("wireguard.subprocess.check_output", check_output)
-    monkeypatch.setattr("wireguard.subprocess.Popen", popen)
-
-    assert wg.gen_keys() == ("private-key", "public-key")
-    check_output.assert_called_once_with(
-        ["wg", "genkey"], stderr=subprocess.STDOUT, text=True
+def test_snapshot_is_typed_and_never_exports_private_or_preshared_keys(wg, run):
+    run.return_value.stdout = HEADER + ROW
+    snapshot = wg.snapshot()
+    assert snapshot == Snapshot(
+        SERVER_KEY,
+        {
+            PEER_KEY: PeerStats(
+                PEER_KEY,
+                ("10.0.0.2/32", "2001:db8::/64"),
+                "[2001:db8::1]:51820",
+                1700000000,
+                200,
+                300,
+                25,
+            )
+        },
     )
-    popen.assert_called_once_with(
-        ["wg", "pubkey"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    assert PRIVATE_KEY not in repr(asdict(snapshot))
+    assert PSK not in repr(asdict(snapshot))
+    assert wg.list_peers() == snapshot.peers
+    with pytest.raises(FrozenInstanceError):
+        snapshot.public_key = OTHER_KEY
+    with pytest.raises(FrozenInstanceError):
+        snapshot.peers[PEER_KEY].transfer_rx = 0
+
+
+@pytest.mark.parametrize("fwmark", ["off", "0", "123", "0xca6c", "0xFFFFFFFF"])
+def test_header_only_is_a_successful_empty_snapshot(wg, run, fwmark):
+    run.return_value.stdout = f"(none)\t{SERVER_KEY}\t0\t{fwmark}\n"
+    assert wg.snapshot() == Snapshot(SERVER_KEY, {})
+
+
+@pytest.mark.parametrize("keepalive", ["off", "0", "65535"])
+def test_unset_peer_values_and_multiple_keys(wg, run, keepalive):
+    run.return_value.stdout = (
+        HEADER + ROW + f"{OTHER_KEY}\t(none)\t(none)\t(none)\t0\t0\t0\t{keepalive}\n"
     )
-    process.communicate.assert_called_once_with(input="private-key")
+    peer = wg.snapshot().peers[OTHER_KEY]
+    assert peer == PeerStats(
+        OTHER_KEY, (), None, None, 0, 0, 0 if keepalive == "off" else int(keepalive)
+    )
+    assert "/" in PEER_KEY and "+" in OTHER_KEY and OTHER_KEY.endswith("=")
 
 
-def test_gen_keys_reports_public_key_process_failure(wg, monkeypatch):
-    monkeypatch.setattr(wg, "_run", Mock(return_value="private-key"))
-    process = Mock(returncode=1)
-    process.communicate.return_value = ("", "invalid private key")
-    monkeypatch.setattr("wireguard.subprocess.Popen", Mock(return_value=process))
+@pytest.mark.parametrize(
+    "dump",
+    [
+        "",
+        "\n",
+        HEADER.replace("\t", " "),
+        HEADER + "\n",
+        HEADER.rstrip("\n") + "\textra\n",
+        HEADER.replace(SERVER_KEY, "(none)"),
+        HEADER.replace("51820", "65536"),
+        HEADER.replace("51820", "-1"),
+        HEADER.replace("off", "-1"),
+        HEADER.replace("off", "0x"),
+        HEADER.replace("off", "4294967296"),
+        HEADER + ROW.replace("\t", " "),
+        HEADER + ROW + ROW,
+        HEADER + ROW.rstrip("\n") + "\textra\n",
+        HEADER + "\t".join(ROW.split("\t")[:-1]) + "\n",
+    ],
+)
+def test_malformed_dump_is_rejected_without_leaking_secrets(wg, run, caplog, dump):
+    run.return_value.stdout = dump
+    with pytest.raises(WireGuardError, match="^Invalid WireGuard dump$") as caught:
+        wg.snapshot()
+    rendered = "".join(traceback.format_exception(caught.value)) + caplog.text
+    assert PRIVATE_KEY not in rendered
+    assert PSK not in rendered
 
-    with pytest.raises(
-        WireGuardError, match="Failed to generate pubkey: invalid private key"
-    ):
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        (0, ""),
+        (0, "bad-key="),
+        (0, base64.b64encode(b"short").decode("ascii")),
+        (0, PEER_KEY[:-2] + "9="),  # Noncanonical Base64 padding bits.
+        (2, ""),
+        (3, ""),
+        (3, "not-a-network"),
+        (3, "10.0.0.2/24"),
+        (3, "10.0.0.2"),
+        (3, "2001:0db8::/64"),
+        (3, "10.0.0.2/32,"),
+        (4, "-1"),
+        (4, "1.2"),
+        (4, ""),
+        (4, "１"),
+        (5, "-1"),
+        (5, "+1"),
+        (6, "-2"),
+        (6, " 2"),
+        (7, "-3"),
+        (7, "no"),
+        (7, "65536"),
+    ],
+)
+def test_invalid_peer_field_rejects_entire_inventory(wg, run, column, value):
+    fields = ROW.rstrip("\n").split("\t")
+    fields[0] = OTHER_KEY
+    fields[column] = value
+    run.return_value.stdout = HEADER + ROW + "\t".join(fields) + "\n"
+    with pytest.raises(WireGuardError, match="Invalid WireGuard dump"):
+        wg.snapshot()
+
+
+def test_gen_keys_sends_private_key_only_on_bounded_stdin(wg, run):
+    run.side_effect = [
+        subprocess.CompletedProcess([], 0, stdout=PRIVATE_KEY + "\n"),
+        subprocess.CompletedProcess([], 0, stdout=OTHER_KEY + "\n"),
+    ]
+    assert wg.gen_keys() == (PRIVATE_KEY, OTHER_KEY)
+    kwargs = dict(check=True, capture_output=True, text=True, timeout=1.25, shell=False)
+    assert run.call_args_list == [
+        call(["wg", "genkey"], input=None, **kwargs),
+        call(["wg", "pubkey"], input=PRIVATE_KEY + "\n", **kwargs),
+    ]
+
+
+@pytest.mark.parametrize("value", ["", "invalid", PRIVATE_KEY[:-2] + "F="])
+@pytest.mark.parametrize("stage", ["private", "public"])
+def test_malformed_generated_keys_are_rejected(wg, run, value, stage):
+    outputs = [value] if stage == "private" else [PRIVATE_KEY, value]
+    run.side_effect = [subprocess.CompletedProcess([], 0, stdout=s) for s in outputs]
+    with pytest.raises(WireGuardError, match="Invalid generated WireGuard key"):
         wg.gen_keys()
+    assert run.call_count == len(outputs)
 
 
-def test_gen_keys_does_not_start_public_key_process_when_genkey_fails(wg, monkeypatch):
-    monkeypatch.setattr(wg, "_run", Mock(side_effect=WireGuardError("genkey failed")))
-    popen = Mock()
-    monkeypatch.setattr("wireguard.subprocess.Popen", popen)
-
-    with pytest.raises(WireGuardError, match="genkey failed"):
+def test_public_key_process_failure_is_safe(wg, run, caplog):
+    run.side_effect = [
+        subprocess.CompletedProcess([], 0, stdout=PRIVATE_KEY),
+        subprocess.TimeoutExpired(["wg", "pubkey"], 1.25, stderr=PRIVATE_KEY),
+    ]
+    with pytest.raises(WireGuardError, match="WireGuard command failed") as caught:
         wg.gen_keys()
-
-    popen.assert_not_called()
-
-
-def test_get_interface_subnet_parses_ip_output(wg, monkeypatch):
-    run = Mock(return_value="7: wg-test inet 10.13.13.1/24 scope global wg-test")
-    monkeypatch.setattr(wg, "_run", run)
-
-    assert wg.get_interface_subnet() == "10.13.13.1/24"
-    run.assert_called_once_with(["ip", "-o", "-f", "inet", "addr", "show", "wg-test"])
+    assert PRIVATE_KEY not in "".join(traceback.format_exception(caught.value))
+    assert PRIVATE_KEY not in caplog.text
 
 
-@pytest.mark.parametrize("output", ["", "7: wg-test scope global"])
-def test_get_interface_subnet_reports_missing_cidr(wg, monkeypatch, output):
-    monkeypatch.setattr(wg, "_run", Mock(return_value=output))
-
-    with pytest.raises(WireGuardError, match="Could not find CIDR") as caught:
-        wg.get_interface_subnet()
-
-    assert isinstance(caught.value.__cause__, WireGuardError)
-    assert "Failed to get subnet for wg-test" in str(caught.value)
+def test_add_and_remove_peer_use_validated_arguments(wg, run):
+    assert wg.add_peer(OTHER_KEY, "10.0.0.2/32") is None
+    assert wg.remove_peer(PEER_KEY) is None
+    assert [c.args[0] for c in run.call_args_list] == [
+        ["wg", "set", "wg-test", "peer", OTHER_KEY, "allowed-ips", "10.0.0.2/32"],
+        ["wg", "set", "wg-test", "peer", PEER_KEY, "remove"],
+    ]
 
 
-def test_get_interface_subnet_preserves_command_failure_cause(wg, monkeypatch):
-    error = WireGuardError("device not found")
-    monkeypatch.setattr(wg, "_run", Mock(side_effect=error))
+@pytest.mark.parametrize(
+    "address",
+    [
+        "10.0.0.2",
+        "10.0.0.0/24",
+        "10.0.0.2/24",
+        "::1/128",
+        "bad",
+        "10.0.0.2/255.255.255.255",
+    ],
+)
+def test_add_rejects_invalid_or_noncanonical_ipv4_host_network(wg, run, address):
+    with pytest.raises(WireGuardError, match="Invalid WireGuard peer"):
+        wg.add_peer(PEER_KEY, address)
+    run.assert_not_called()
 
-    with pytest.raises(
-        WireGuardError, match="Failed to get subnet for wg-test"
-    ) as caught:
-        wg.get_interface_subnet()
 
-    assert caught.value.__cause__ is error
+@pytest.mark.parametrize("key", ["", "--help", PEER_KEY[:-2] + "9="])
+def test_mutations_reject_invalid_keys_before_subprocess(wg, run, key):
+    with pytest.raises(WireGuardError, match="Invalid WireGuard peer"):
+        wg.add_peer(key, "10.0.0.2/32")
+    with pytest.raises(WireGuardError, match="Invalid WireGuard peer key"):
+        wg.remove_peer(key)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["add", "remove"])
+def test_mutation_failures_propagate(wg, run, operation):
+    run.side_effect = PermissionError("denied")
+    with pytest.raises(WireGuardError, match="WireGuard command failed"):
+        if operation == "add":
+            wg.add_peer(PEER_KEY, "10.0.0.2/32")
+        else:
+            wg.remove_peer(PEER_KEY)

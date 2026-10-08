@@ -1,222 +1,141 @@
+"""Typed, bounded subprocess access to a single WireGuard interface."""
+
 import ipaddress
-import json
-import logging
-import os
+import math
+import re
 import subprocess
-from typing import Any, cast
+from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+from errors import WireGuardError
+from keys import validate_key
 
 
-class WireGuardError(Exception):
-    pass
+@dataclass(frozen=True)
+class PeerStats:
+    public_key: str
+    allowed_ips: tuple[str, ...]
+    endpoint: str | None
+    latest_handshake: int | None
+    transfer_rx: int
+    transfer_tx: int
+    persistent_keepalive: int
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    public_key: str
+    peers: dict[str, PeerStats]
+
+
+def _unsigned(value: str) -> int:
+    if re.fullmatch(r"[0-9]+", value) is None:
+        raise ValueError("Invalid unsigned integer")
+    return int(value)
 
 
 class WireGuard:
-    def __init__(
-        self, interface: str = "wg0", storage_path: str = "/config/peers.json"
-    ) -> None:
+    def __init__(self, interface: str = "wg0", timeout: float = 5.0) -> None:
+        if re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,14}", interface) is None:
+            raise WireGuardError("Invalid WireGuard interface")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise WireGuardError("Invalid WireGuard timeout")
         self.interface = interface
-        self.storage_path = storage_path
-        # Ensure directory exists if possible, though /config is usually a volume
-        storage_dir = os.path.dirname(self.storage_path)
-        if storage_dir and not os.path.exists(storage_dir):
-            try:
-                os.makedirs(storage_dir, exist_ok=True)
-            except OSError as e:
-                logger.warning(f"Could not create storage directory {storage_dir}: {e}")
+        self.timeout = timeout
 
-    def _run(self, cmd: list[str]) -> str:
+    def _run(self, command: list[str], input_text: str | None = None) -> str:
         try:
-            # shell=False is safer. We pass list of arguments.
-            result = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
-            return result.strip()
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Command failed: {cmd}, output: {e.output}")
-            raise WireGuardError(f"WireGuard command failed: {e.output}") from e
-        except FileNotFoundError as e:
-            # For development/testing/mocking purposes where 'wg' might not exist
-            logger.warning(
-                "wg command not found. Returning mock data or raising error."
+            result = subprocess.run(
+                command,
+                input=input_text,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                shell=False,
             )
-            if cmd[0] == "wg" and "show" in cmd:
-                return ""
-            raise WireGuardError("WireGuard command not found") from e
+        except subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired:
+            # Subprocess exceptions can contain keys in command, input, or output.
+            raise WireGuardError("WireGuard command failed") from None
+        return result.stdout
 
-    def list_peers(self) -> dict[str, dict[str, Any]]:
-        """
-        Parses `wg show <interface> dump` to get peer list.
-        Returns dict keyed by public_key.
-        """
+    def snapshot(self) -> Snapshot:
+        output = self._run(["wg", "show", self.interface, "dump"])
         try:
-            output = self._run(["wg", "show", self.interface, "dump"])
-        except WireGuardError:
-            return {}
+            lines = output.splitlines()
+            if not lines:
+                raise ValueError("Missing interface header")
+            header = lines[0].split("\t")
+            if len(header) != 4:
+                raise ValueError("Invalid interface header")
+            _, public_key, listen_port, fwmark = header
+            validate_key(public_key)
+            if _unsigned(listen_port) > 65535:
+                raise ValueError("Invalid listen port")
+            if fwmark != "off":
+                if re.fullmatch(r"(?:[0-9]+|0x[0-9a-fA-F]+)", fwmark) is None:
+                    raise ValueError("Invalid firewall mark")
+                mark = int(fwmark, 16) if fwmark.startswith("0x") else int(fwmark)
+                if mark > 0xFFFFFFFF:
+                    raise ValueError("Invalid firewall mark")
 
-        peers = {}
-        lines = output.splitlines()
-        # Format: public_key, preshared_key, endpoint, allowed_ips, latest_handshake
-        # transfer_rx, transfer_tx, persistent_keepalive
+            peers: dict[str, PeerStats] = {}
+            for line in lines[1:]:
+                fields = line.split("\t")
+                if len(fields) != 8:
+                    raise ValueError("Invalid peer row")
+                key, _, endpoint, allowed, handshake, rx, tx, keepalive = fields
+                validate_key(key)
+                if key in peers or not endpoint:
+                    raise ValueError("Invalid peer identity or endpoint")
+                allowed_ips = () if allowed == "(none)" else tuple(allowed.split(","))
+                for network in allowed_ips:
+                    if str(ipaddress.ip_network(network, strict=True)) != network:
+                        raise ValueError("Noncanonical allowed network")
+                latest_handshake = _unsigned(handshake)
+                persistent_keepalive = 0 if keepalive == "off" else _unsigned(keepalive)
+                if persistent_keepalive > 65535:
+                    raise ValueError("Invalid keepalive")
+                peers[key] = PeerStats(
+                    public_key=key,
+                    allowed_ips=allowed_ips,
+                    endpoint=None if endpoint == "(none)" else endpoint,
+                    latest_handshake=latest_handshake or None,
+                    transfer_rx=_unsigned(rx),
+                    transfer_tx=_unsigned(tx),
+                    persistent_keepalive=persistent_keepalive,
+                )
+            return Snapshot(public_key=public_key, peers=peers)
+        except ValueError:
+            raise WireGuardError("Invalid WireGuard dump") from None
 
-        for line in lines:
-            parts = line.split()
-            if len(parts) < 8:
-                # might be interface line (4 parts)
-                continue
-
-            public_key = parts[0]
-            # Verify if it looks like a pubkey (base64, 44 chars) - simple check
-            if not public_key.endswith("="):
-                continue
-
-            peers[public_key] = {
-                "preshared_key": parts[1],
-                "endpoint": parts[2],
-                "allowed_ips": parts[3].split(","),
-                "latest_handshake": parts[4],
-                "transfer_rx": parts[5],
-                "transfer_tx": parts[6],
-                "persistent_keepalive": parts[7],
-            }
-        return peers
-
-    def _add_peer_to_interface(self, public_key: str, allowed_ips: list[str]) -> None:
-        """
-        Internal method to just run the command to add peer to interface.
-        """
-        ips_str = ",".join(allowed_ips)
-        self._run(
-            ["wg", "set", self.interface, "peer", public_key, "allowed-ips", ips_str]
-        )
-
-    def create_peer(self, public_key: str, allowed_ips: list[str]) -> None:
-        """
-        Adds a peer to the interface and saves to storage.
-        """
-        self._add_peer_to_interface(public_key, allowed_ips)
-        self.save_peer_to_storage(public_key, allowed_ips)
-
-    def delete_peer(self, public_key: str) -> None:
-        """
-        Removes a peer and deletes from storage.
-        """
-        self._run(["wg", "set", self.interface, "peer", public_key, "remove"])
-        self.remove_peer_from_storage(public_key)
+    def list_peers(self) -> dict[str, PeerStats]:
+        return self.snapshot().peers
 
     def gen_keys(self) -> tuple[str, str]:
-        """
-        Generates (private_key, public_key) pair.
-        """
-        # wg genkey | tee privatekey | wg pubkey > publickey
-        # We can do this in python to avoid pipe complexity or run separate commands
-        priv_key = self._run(["wg", "genkey"])
-
-        # Pipe priv_key to 'wg pubkey' stdin
-        process = subprocess.Popen(
-            ["wg", "pubkey"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        pub_key, stderr = process.communicate(input=priv_key)
-
-        if process.returncode != 0:
-            raise WireGuardError(f"Failed to generate pubkey: {stderr}")
-
-        return priv_key.strip(), pub_key.strip()
-
-    def get_interface_subnet(self) -> str:
-        """
-        Returns the subnet CIDR of the WireGuard interface (e.g., "10.13.13.1/24").
-        """
-        # ip -o -f inet addr show <interface>
         try:
-            output = self._run(
-                ["ip", "-o", "-f", "inet", "addr", "show", self.interface]
+            private_key = validate_key(self._run(["wg", "genkey"]).strip())
+            public_key = validate_key(
+                self._run(["wg", "pubkey"], input_text=private_key + "\n").strip()
             )
-            # Parse CIDR from output
-            # Split by whitespace, find the part with '/'
-            for part in output.split():
-                if "/" in part:
-                    return part
-            raise WireGuardError(f"Could not find CIDR in output: {output}")
-        except Exception as e:
-            raise WireGuardError(
-                f"Failed to get subnet for {self.interface}: {e}"
-            ) from e
+        except ValueError:
+            raise WireGuardError("Invalid generated WireGuard key") from None
+        return private_key, public_key
 
-    def allocate_next_ip(self, subnet_cidr: str, used_ips: set[str]) -> str:
-        """
-        Finds the next available IP in the subnet.
-        """
+    def add_peer(self, public_key: str, address: str) -> None:
         try:
-            network = ipaddress.ip_network(subnet_cidr, strict=False)
-        except ValueError as e:
-            raise WireGuardError(f"Invalid subnet CIDR: {subnet_cidr}") from e
+            validate_key(public_key)
+            network = ipaddress.IPv4Network(address, strict=True)
+            if network.prefixlen != 32 or str(network) != address:
+                raise ValueError("Expected a canonical IPv4 host network")
+        except ValueError:
+            raise WireGuardError("Invalid WireGuard peer") from None
+        self._run(
+            ["wg", "set", self.interface, "peer", public_key, "allowed-ips", address]
+        )
 
-        # Host iterator (excludes network address and broadcast address)
-        for ip in network.hosts():
-            ip_str = str(ip)
-            # Check if this IP is the assigned interface IP (gateway for peers)
-            server_ip = subnet_cidr.split("/")[0]
-            if ip_str == server_ip:
-                continue
-
-            if ip_str not in used_ips:
-                return ip_str
-
-        raise WireGuardError("No available IPs in subnet")
-
-    # --- Persistence Methods ---
-
-    def load_peers_from_storage(self) -> dict[str, dict[str, Any]]:
-        if not os.path.exists(self.storage_path):
-            return {}
+    def remove_peer(self, public_key: str) -> None:
         try:
-            with open(self.storage_path) as f:
-                return cast(dict[str, dict[str, Any]], json.load(f))
-        except Exception as e:
-            logger.error(f"Failed to load peers from storage: {e}")
-            return {}
-
-    def save_peer_to_storage(self, public_key: str, allowed_ips: list[str]) -> None:
-        peers = self.load_peers_from_storage()
-        peers[public_key] = {"allowed_ips": allowed_ips}
-        # We could store more meta-data here if needed
-        self._write_storage(peers)
-
-    def remove_peer_from_storage(self, public_key: str) -> None:
-        peers = self.load_peers_from_storage()
-        if public_key in peers:
-            del peers[public_key]
-            self._write_storage(peers)
-
-    def _write_storage(self, peers: dict[str, dict[str, Any]]) -> None:
-        try:
-            with open(self.storage_path, "w") as f:
-                json.dump(peers, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to write peers to storage: {e}")
-
-    def restore_peers(self) -> None:
-        """
-        Restores peers from storage to the WireGuard interface.
-        Should be called on startup.
-        """
-        logger.info(f"Restoring peers from {self.storage_path}")
-        stored_peers = self.load_peers_from_storage()
-
-        # Get currently active peers to avoid duplicates or errors
-        # But 'wg set' is generally idempotent for adding peers.
-
-        count = 0
-        for public_key, data in stored_peers.items():
-            allowed_ips = data.get("allowed_ips", [])
-            try:
-                self._add_peer_to_interface(public_key, allowed_ips)
-                count += 1
-            except WireGuardError as e:
-                logger.error(f"Failed to restore peer {public_key}: {e}")
-
-        logger.info(f"Restored {count} peers.")
+            validate_key(public_key)
+        except ValueError:
+            raise WireGuardError("Invalid WireGuard peer key") from None
+        self._run(["wg", "set", self.interface, "peer", public_key, "remove"])

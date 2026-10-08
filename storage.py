@@ -1,0 +1,500 @@
+"""Durable desired state; kernel changes are replayed from pending operations.
+
+The service holds ``lock()`` across its read/allocate/kernel/write sequence.
+Repository writes themselves use short SQLite transactions. Operation history
+deliberately has no peer foreign key: successful deletion retains that history.
+"""
+
+import fcntl
+import ipaddress
+import json
+import os
+import sqlite3
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import Literal
+from uuid import uuid4
+
+from errors import ConflictError, NotFoundError, StorageError
+from keys import validate_key
+
+
+@dataclass(frozen=True)
+class PeerRecord:
+    id: str
+    public_key: str
+    address: str
+    state: Literal["pending", "active", "deleting"]
+    created_at: float
+
+
+@dataclass(frozen=True)
+class OperationRecord:
+    id: str
+    peer_id: str
+    kind: Literal["create", "delete"]
+    status: Literal["pending", "complete"]
+    public_key: str
+    address: str
+    error: str | None
+    created_at: float
+    request_key: str | None = None
+    fingerprint: str | None = None
+
+
+_SCHEMA = (
+    """CREATE TABLE metadata (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        version INTEGER NOT NULL, interface TEXT NOT NULL,
+        server_address TEXT NOT NULL, migrated INTEGER NOT NULL CHECK(migrated IN (0,1))
+    )""",
+    """CREATE TABLE peers (
+        id TEXT PRIMARY KEY, public_key TEXT NOT NULL UNIQUE,
+        address TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK(state IN ('pending','active','deleting')),
+        created_at REAL NOT NULL
+    )""",
+    """CREATE TABLE operations (
+        id TEXT PRIMARY KEY, peer_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('create','delete')),
+        status TEXT NOT NULL CHECK(status IN ('pending','complete')),
+        public_key TEXT NOT NULL, address TEXT NOT NULL, error TEXT,
+        created_at REAL NOT NULL, request_key TEXT UNIQUE, fingerprint TEXT
+    )""",
+    "CREATE INDEX operation_peer ON operations(peer_id, created_at)",
+    """CREATE UNIQUE INDEX operation_pending ON operations(peer_id)
+        WHERE status = 'pending'""",
+)
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("Duplicate legacy JSON key")
+        result[name] = value
+    return result
+
+
+class Store:
+    def __init__(
+        self,
+        path: Path,
+        interface: str,
+        server_address: str,
+        legacy_path: Path | None = None,
+        lock_timeout: float = 5.0,
+    ) -> None:
+        self.path = path.absolute()
+        self.interface = interface
+        try:
+            self._server = ipaddress.IPv4Interface(server_address)
+        except ValueError as exc:
+            raise StorageError("Invalid storage network identity") from exc
+        self.server_address = str(self._server)
+        self.legacy_path = legacy_path
+        if not 0 <= lock_timeout < float("inf"):
+            raise StorageError("Invalid storage lock timeout")
+        self.lock_timeout = lock_timeout
+        self._thread_lock = threading.RLock()
+        self._lock_depth = 0
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Reentrant per instance; stable flock inode also excludes other processes."""
+        deadline = time.monotonic() + self.lock_timeout
+        if not self._thread_lock.acquire(timeout=self.lock_timeout):
+            raise StorageError("Storage lock timed out")
+        try:
+            if self._lock_depth:
+                self._lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth -= 1
+                return
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(
+                    str(self.path) + ".lock",
+                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                    0o600,
+                )
+                with os.fdopen(fd, "r+b") as lock_file:
+                    os.fchmod(lock_file.fileno(), 0o600)
+                    while True:
+                        try:
+                            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                raise StorageError("Storage lock timed out") from None
+                            time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+                    self._lock_depth = 1
+                    try:
+                        yield
+                    finally:
+                        self._lock_depth = 0
+            except OSError as exc:
+                raise StorageError("Storage lock unavailable") from exc
+        finally:
+            self._thread_lock.release()
+
+    @contextmanager
+    def _connection(
+        self, *, write: bool = False, initialize: bool = False
+    ) -> Iterator[sqlite3.Connection]:
+        try:
+            mode = "rwc" if initialize else "rw"
+            connection = sqlite3.connect(
+                self.path.as_uri() + f"?mode={mode}",
+                uri=True,
+                timeout=self.lock_timeout,
+                isolation_level=None,
+            )
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA synchronous = FULL")
+                connection.execute("PRAGMA foreign_keys = ON")
+                if write:
+                    connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                if write:
+                    connection.commit()
+            finally:
+                # Closing also rolls back an unfinished transaction, including when
+                # COMMIT itself fails. Never claim kernel/SQLite atomicity.
+                connection.close()
+        except sqlite3.Error as exc:
+            raise StorageError("Peer storage unavailable") from exc
+
+    def initialize(self) -> None:
+        with self.lock(), self._connection(write=True, initialize=True) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if not tables:
+                for statement in _SCHEMA:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO metadata VALUES (1, 1, ?, ?, 0)",
+                    (self.interface, self.server_address),
+                )
+            elif tables != {"metadata", "peers", "operations"}:
+                raise StorageError("Unrecognized peer storage schema")
+            self._check_identity(connection)
+            # Check structural corruption before trusting the migration marker.
+            self._quick_check(connection)
+            for table, record in (
+                ("peers", PeerRecord),
+                ("operations", OperationRecord),
+            ):
+                columns = [
+                    row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+                ]
+                if columns != [field.name for field in fields(record)]:
+                    raise StorageError("Unrecognized peer storage schema")
+            migrated = connection.execute("SELECT migrated FROM metadata").fetchone()[0]
+            if not migrated:
+                if (
+                    connection.execute("SELECT count(*) FROM peers").fetchone()[0]
+                    or (
+                        connection.execute(
+                            "SELECT count(*) FROM operations"
+                        ).fetchone()[0]
+                    )
+                ):
+                    raise StorageError("Untracked inventory cannot be migrated safely")
+                for public_key, address in self._legacy_peers():
+                    self._insert_peer(connection, public_key, address, None, None)
+                connection.execute("UPDATE metadata SET migrated = 1")
+        try:
+            self.path.chmod(0o600)
+        except OSError as exc:
+            raise StorageError("Cannot restrict peer storage permissions") from exc
+
+    def _check_identity(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            "SELECT version, interface, server_address FROM metadata"
+        ).fetchall()
+        if len(rows) != 1 or tuple(rows[0]) != (
+            1,
+            self.interface,
+            self.server_address,
+        ):
+            raise StorageError("Peer storage schema or network identity mismatch")
+
+    @staticmethod
+    def _quick_check(connection: sqlite3.Connection) -> None:
+        if [row[0] for row in connection.execute("PRAGMA quick_check")] != ["ok"]:
+            raise StorageError("Peer storage integrity check failed")
+
+    def _address(self, address: str) -> str:
+        client = ipaddress.IPv4Interface(address)
+        network = self._server.network
+        if (
+            client.network.prefixlen != 32
+            or client.ip not in network
+            or client.ip
+            in (self._server.ip, network.network_address, network.broadcast_address)
+        ):
+            raise ValueError("Expected an available IPv4 client address")
+        return str(client.ip)
+
+    def _legacy_peers(self) -> list[tuple[str, str]]:
+        if self.legacy_path is None:
+            return []
+        try:
+            text = self.legacy_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        except (OSError, UnicodeError) as exc:
+            raise StorageError("Cannot read legacy inventory") from exc
+        try:
+            inventory = json.loads(text, object_pairs_hook=_unique_object)
+            if not isinstance(inventory, dict):
+                raise ValueError("Expected a legacy inventory object")
+            peers: list[tuple[str, str]] = []
+            addresses: set[str] = set()
+            for public_key, data in inventory.items():
+                validate_key(public_key)
+                if not isinstance(data, dict) or set(data) != {"allowed_ips"}:
+                    raise ValueError("Invalid legacy peer record")
+                ips = data["allowed_ips"]
+                if not isinstance(ips, list) or len(ips) != 1:
+                    raise ValueError("Expected one legacy client address")
+                if not isinstance(ips[0], str) or not ips[0].endswith("/32"):
+                    raise ValueError("Expected an IPv4 /32")
+                address = self._address(ips[0])
+                if address in addresses:
+                    raise ValueError("Duplicate legacy client address")
+                addresses.add(address)
+                peers.append((public_key, address))
+            return peers
+        except ValueError as exc:
+            raise StorageError("Invalid legacy inventory; original preserved") from exc
+
+    @staticmethod
+    def _insert_peer(
+        connection: sqlite3.Connection,
+        public_key: str,
+        address: str,
+        request_key: str | None,
+        fingerprint: str | None,
+    ) -> tuple[PeerRecord, OperationRecord]:
+        now = time.time()
+        peer = PeerRecord(str(uuid4()), public_key, address, "pending", now)
+        operation = OperationRecord(
+            str(uuid4()),
+            peer.id,
+            "create",
+            "pending",
+            public_key,
+            address,
+            None,
+            now,
+            request_key,
+            fingerprint,
+        )
+        connection.execute(
+            "INSERT INTO peers VALUES (?, ?, ?, ?, ?)",
+            (peer.id, public_key, address, peer.state, now),
+        )
+        connection.execute(
+            "INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                operation.id,
+                peer.id,
+                operation.kind,
+                operation.status,
+                public_key,
+                address,
+                None,
+                now,
+                request_key,
+                fingerprint,
+            ),
+        )
+        return peer, operation
+
+    def list_peers(
+        self, limit: int | None = None, after: str | None = None
+    ) -> list[PeerRecord]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM peers WHERE (? IS NULL OR id > ?) ORDER BY id LIMIT ?",
+                (after, after, -1 if limit is None else max(0, limit)),
+            )
+            return [PeerRecord(**dict(row)) for row in rows]
+
+    def get_peer(self, id: str) -> PeerRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM peers WHERE id = ?", (id,)
+            ).fetchone()
+            return None if row is None else PeerRecord(**dict(row))
+
+    def get_operation(self, id: str) -> OperationRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE id = ?", (id,)
+            ).fetchone()
+            return None if row is None else OperationRecord(**dict(row))
+
+    def pending_operations(self) -> list[OperationRecord]:
+        with self._connection() as connection:
+            return [
+                OperationRecord(**dict(row))
+                for row in connection.execute(
+                    "SELECT * FROM operations WHERE status = 'pending' "
+                    "ORDER BY created_at, id"
+                )
+            ]
+
+    def find_request(self, key: str) -> OperationRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE request_key = ?", (key,)
+            ).fetchone()
+            return None if row is None else OperationRecord(**dict(row))
+
+    def latest_operation(self, peer_id: str) -> OperationRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE peer_id = ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (peer_id,),
+            ).fetchone()
+            return None if row is None else OperationRecord(**dict(row))
+
+    def create_peer(
+        self,
+        public_key: str,
+        address: str,
+        request_key: str | None = None,
+        fingerprint: str | None = None,
+    ) -> tuple[PeerRecord, OperationRecord]:
+        validate_key(public_key)
+        address = self._address(address)
+        try:
+            with self._connection(write=True) as connection:
+                return self._insert_peer(
+                    connection, public_key, address, request_key, fingerprint
+                )
+        except StorageError as exc:
+            if isinstance(exc.__cause__, sqlite3.IntegrityError):
+                raise ConflictError(
+                    "Peer key, address or request key already reserved"
+                ) from exc
+            raise
+
+    def request_delete(self, peer_id: str) -> OperationRecord:
+        with self._connection(write=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM peers WHERE id = ?", (peer_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("Peer not found")
+            peer = PeerRecord(**dict(row))
+            if peer.state == "deleting":
+                row = connection.execute(
+                    "SELECT * FROM operations WHERE peer_id = ? "
+                    "AND kind = 'delete' AND status = 'pending'",
+                    (peer_id,),
+                ).fetchone()
+                if row is None:
+                    raise StorageError("Deleting peer has no pending operation")
+                return OperationRecord(**dict(row))
+            connection.execute(
+                "UPDATE operations SET status = 'complete' "
+                "WHERE peer_id = ? AND status = 'pending'",
+                (peer_id,),
+            )
+            operation = OperationRecord(
+                str(uuid4()),
+                peer_id,
+                "delete",
+                "pending",
+                peer.public_key,
+                peer.address,
+                None,
+                time.time(),
+            )
+            connection.execute(
+                "INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+                (
+                    operation.id,
+                    peer_id,
+                    operation.kind,
+                    operation.status,
+                    peer.public_key,
+                    peer.address,
+                    None,
+                    operation.created_at,
+                ),
+            )
+            connection.execute(
+                "UPDATE peers SET state = 'deleting' WHERE id = ?", (peer_id,)
+            )
+            return operation
+
+    def complete_operation(self, id: str) -> None:
+        with self._connection(write=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE id = ?", (id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("Operation not found")
+            operation = OperationRecord(**dict(row))
+            if operation.status == "complete":
+                return
+            if operation.kind == "create":
+                connection.execute(
+                    "UPDATE peers SET state = 'active' "
+                    "WHERE id = ? AND state = 'pending'",
+                    (operation.peer_id,),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM peers WHERE id = ? AND state = 'deleting'",
+                    (operation.peer_id,),
+                )
+            connection.execute(
+                "UPDATE operations SET status = 'complete', error = NULL WHERE id = ?",
+                (id,),
+            )
+
+    def fail_operation(self, id: str, message: str) -> None:
+        with self._connection(write=True) as connection:
+            if (
+                connection.execute(
+                    "SELECT id FROM operations WHERE id = ?", (id,)
+                ).fetchone()
+                is None
+            ):
+                raise NotFoundError("Operation not found")
+            connection.execute(
+                "UPDATE operations SET error = ? WHERE id = ? AND status = 'pending'",
+                (message, id),
+            )
+
+    def health_check(self) -> None:
+        with self._connection() as connection:
+            self._check_identity(connection)
+            self._quick_check(connection)
+            connection.execute("SELECT count(*) FROM peers").fetchone()
+
+    def pending_count(self) -> int:
+        with self._connection() as connection:
+            return int(
+                connection.execute(
+                    "SELECT count(*) FROM operations WHERE status = 'pending'"
+                ).fetchone()[0]
+            )

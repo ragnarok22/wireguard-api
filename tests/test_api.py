@@ -237,6 +237,33 @@ def test_create_config_with_public_key_returns_400(client, api_module, auth_head
     assert "Cannot generate config" in response.json()["detail"]
 
 
+def test_rejected_config_request_does_not_create_a_peer(
+    client, api_module, auth_headers
+):
+    fake = FakeWireGuard()
+    api_module.wg = fake
+    response = client.post(
+        "/peers?format=config",
+        headers=auth_headers,
+        json={"public_key": "existing", "allowed_ips": ["10.0.0.3/32"]},
+    )
+
+    assert response.status_code == 400
+    assert fake.created == []
+
+
+def test_health_does_not_hide_a_real_wireguard_query_failure(
+    client, api_module, tmp_path, monkeypatch
+):
+    backend = WireGuard(storage_path=str(tmp_path / "peers.json"))
+    monkeypatch.setattr(
+        backend, "_run", Mock(side_effect=WireGuardError("interface unavailable"))
+    )
+    api_module.wg = backend
+
+    assert client.get("/health").status_code == 503
+
+
 def test_get_peer_not_found_returns_404(client, api_module, auth_headers):
     api_module.wg = FakeWireGuard(peers={})
 
