@@ -617,11 +617,17 @@ python3 scripts/smoke_container.py wireguard-api:smoke
 The smoke runner requires Python 3.10+ and Docker on a WireGuard-capable Linux
 host. It creates disposable server/client/target containers, networking, and a
 volume; checks authentication, `/v1` contracts, configuration templates, probes,
-metrics, a real WireGuard handshake, and tunneled HTTP traffic to a NAT target;
+metrics, and applies the API-returned client configuration with `wg-quick`;
+checks a real WireGuard handshake, full-tunnel routing, configured DNS, and
+tunneled HTTP traffic/NAT using a controlled DNS/HTTP target on a separate network;
 checks stats/rates and CPU/RAM inside a server limited to 0.5 CPU and 256 MiB;
 then recreates the server and verifies persistence, deletion, and preserved
-server identity. It cleans up its resources. Application dependencies stay
-inside the image.
+server identity. Finally, it revokes the connected client while continuous HTTP
+requests are running, requires repeated failures with no recovered access, and
+checks that the target remains available. It has a 300-second overall deadline
+and cleans up its containers, both networks, and volume on success or failure.
+Application dependencies stay inside the image; no public Internet/DNS service
+is needed. This exercises the supported IPv4-only, `0.0.0.0/0` client policy.
 
 ### CI, publishing, and dependency updates
 
