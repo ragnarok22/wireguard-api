@@ -1,85 +1,29 @@
-# Build stage
-FROM python:3.13-slim-bookworm as builder
+# syntax=docker/dockerfile:1
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
 
-# Configure uv
-# Compile bytecode for faster startup
-ENV UV_COMPILE_BYTECODE=1 
-# Disable link mode (copy files instead of hardlinking) since we copy from builder
-ENV UV_LINK_MODE=copy 
+FROM lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls124@sha256:216ca1ce9da7bfe26fb752111d952487804bd18933bbd4794970d424bf8adfe9
 
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:$PATH"
+
+# Use Alpine's interpreter and wheels; no cross-distribution venv copying.
+RUN apk add --no-cache python3 curl ca-certificates \
+    && python3 -c 'import sys; assert sys.version_info >= (3, 14), sys.version'
+
+COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /app
 
-# Install dependencies
-# We use a cache mount to speed up subsequent builds
-# We copy only the lock files first to leverage layer caching
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --locked --no-dev --no-install-project --python=/usr/bin/python3
 
-# Copy the application code and sync the project (if needed for package mode, or just checks)
-COPY . .
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+COPY api.py health.py metrics.py wireguard.py ./
+COPY --chmod=755 service_run /etc/services.d/api/run
 
+EXPOSE 51820/udp 8008/tcp
 
-# Final stage
-FROM linuxserver/wireguard
-
-ENV API_TOKEN ${API_TOKEN}
-ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-
-# Install runtime dependencies (Python)
-# We need to ensure python 3.13 is available or installed. 
-# Since we are using linuxserver/wireguard, we might need to add python manually if not present,
-# BUT we should reuse the python environment from the builder if possible OR install python in the final stage.
-# However, copying a venv created with a specific python version to a different image 
-# requires the *same* python interpreter path/version.
-# A safer bet with `uv` and multi-stage across potentially different base images (uv image is chemically different from linuxserver/wireguard)
-# is to install python in the final image and `uv sync` again OR 
-# install dependencies *into* the final image using `uv`.
-
-# Let's adjust approach: 
-# 1. Install `uv` in the final image (it's a static binary, easy to copy).
-# 2. Use `uv` to install the python environment directly in the final image.
-# This ensures compatibility with the OS of the final image.
-
-# Install dependencies for python (if needed by the base OS)
-# linuxserver/wireguard is base on Alpine
-RUN apk add --no-cache \
-    python3 \
-    curl \
-    iptables \
-    iproute2 \
-    ca-certificates
-
-# Copy uv from the builder image
-COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
-
-WORKDIR /app
-
-# Copy project files
-COPY pyproject.toml uv.lock ./
-
-# Install dependencies directly in the final image 
-# (using cache mount to speed it up if built locally with buildkit)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --python=/usr/bin/python3
-
-# Copy application code
-COPY . .
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --python=/usr/bin/python3
-
-# S6-Overlay service configuration
-COPY service_run /etc/services.d/api/run
-RUN chmod +x /etc/services.d/api/run
-
-EXPOSE 51820
-EXPOSE 8008
-
-# Remove default CMD as we use S6 services
-# (Base image ENTRYPOINT is /init)
+# S6 and the /init entrypoint are inherited from the WireGuard base image.

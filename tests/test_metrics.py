@@ -1,11 +1,6 @@
-import sys
 import time
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-from metrics import (  # noqa: E402
+from metrics import (
     PEER_LAST_HANDSHAKE,
     PEER_TRANSFER_RX,
     PEER_TRANSFER_TX,
@@ -13,7 +8,7 @@ from metrics import (  # noqa: E402
     normalize_path,
     update_wireguard_metrics,
 )
-from wireguard import WireGuardError  # noqa: E402
+from wireguard import WireGuardError
 
 
 class FakeWireGuard:

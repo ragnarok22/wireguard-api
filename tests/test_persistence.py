@@ -1,13 +1,8 @@
 import json
 import os
-import sys
 import tempfile
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-from wireguard import WireGuard  # noqa: E402
+from wireguard import WireGuard
 
 
 def test_save_and_load_peers():

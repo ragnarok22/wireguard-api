@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import subprocess
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class WireGuardError(Exception):
 class WireGuard:
     def __init__(
         self, interface: str = "wg0", storage_path: str = "/config/peers.json"
-    ):
+    ) -> None:
         self.interface = interface
         self.storage_path = storage_path
         # Ensure directory exists if possible, though /config is usually a volume
@@ -42,7 +43,7 @@ class WireGuard:
                 return ""
             raise WireGuardError("WireGuard command not found") from e
 
-    def list_peers(self) -> dict[str, dict]:
+    def list_peers(self) -> dict[str, dict[str, Any]]:
         """
         Parses `wg show <interface> dump` to get peer list.
         Returns dict keyed by public_key.
@@ -169,12 +170,12 @@ class WireGuard:
 
     # --- Persistence Methods ---
 
-    def load_peers_from_storage(self) -> dict:
+    def load_peers_from_storage(self) -> dict[str, dict[str, Any]]:
         if not os.path.exists(self.storage_path):
             return {}
         try:
             with open(self.storage_path) as f:
-                return json.load(f)
+                return cast(dict[str, dict[str, Any]], json.load(f))
         except Exception as e:
             logger.error(f"Failed to load peers from storage: {e}")
             return {}
@@ -191,7 +192,7 @@ class WireGuard:
             del peers[public_key]
             self._write_storage(peers)
 
-    def _write_storage(self, peers: dict) -> None:
+    def _write_storage(self, peers: dict[str, dict[str, Any]]) -> None:
         try:
             with open(self.storage_path, "w") as f:
                 json.dump(peers, f, indent=2)

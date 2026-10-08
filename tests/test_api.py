@@ -1,14 +1,10 @@
 import importlib
 import sys
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-from wireguard import WireGuardError  # noqa: E402
+from wireguard import WireGuardError
 
 
 class FakeWireGuard:
@@ -73,7 +69,6 @@ class FakeWireGuard:
 @pytest.fixture()
 def api_module(monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token")
-    monkeypatch.syspath_prepend(str(REPO_ROOT))
     if "api" in sys.modules:
         del sys.modules["api"]
     return importlib.import_module("api")

@@ -1,11 +1,5 @@
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-from health import HealthStatus, check_health  # noqa: E402
-from wireguard import WireGuardError  # noqa: E402
+from health import HealthStatus, check_health
+from wireguard import WireGuardError
 
 
 class FakeWireGuard:

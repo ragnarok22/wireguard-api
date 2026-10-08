@@ -1,17 +1,30 @@
-.PHONY: install format lint run test
+UV ?= uv
+
+.PHONY: install format format-check lint typecheck run test coverage check
 
 install:
-	uv sync
+	$(UV) sync --locked
 
 format:
-	uv run ruff format .
-	uv run ruff check . --fix
+	$(UV) run --locked ruff format .
+	$(UV) run --locked ruff check . --fix
+
+format-check:
+	$(UV) run --locked ruff format --check .
 
 lint:
-	uv run ruff check .
+	$(UV) run --locked ruff check .
+
+typecheck:
+	$(UV) run --locked mypy
 
 run:
-	uv run uvicorn api:app --reload
+	$(UV) run --locked uvicorn api:app --host 127.0.0.1 --port 8008 --reload
 
 test:
-	uv run pytest
+	$(UV) run --locked pytest
+
+coverage:
+	$(UV) run --locked pytest --cov --cov-report=term-missing --cov-report=xml
+
+check: lint format-check typecheck test

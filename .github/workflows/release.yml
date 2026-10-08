@@ -1,21 +1,20 @@
-on:
-  push:
-    # Sequence of patterns matched against refs/tags
-    tags: [ 'v*.*.*' ]
-
 name: Release
 
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
 jobs:
-  build:
-    name: Build Release
+  release:
+    name: Create GitHub release
     runs-on: ubuntu-latest
-
-
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Create release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          # body_path: CHANGELOG.md  (Optional: if you have one)
+          generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

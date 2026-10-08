@@ -1,7 +1,8 @@
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -26,7 +27,7 @@ WG_INTERFACE = os.getenv("WG_INTERFACE", "wg0")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup: restore peers
     try:
         wg.restore_peers()
@@ -44,7 +45,7 @@ wg = WireGuard(interface=WG_INTERFACE)
 
 # --- Exception Handlers ---
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
@@ -56,7 +57,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 header_scheme = APIKeyHeader(name="X-API-Token")
 
 
-async def get_token_header(x_api_token: Annotated[str, Depends(header_scheme)]):
+async def get_token_header(
+    x_api_token: Annotated[str, Depends(header_scheme)],
+) -> None:
     if x_api_token != TOKEN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -105,7 +108,7 @@ def _get_server_endpoint() -> str:
 
 
 @app.get("/health", response_model=HealthStatus)
-async def health_check():
+async def health_check() -> JSONResponse:
     """
     Health check endpoint for liveness/readiness probes.
     Returns 200 if WireGuard is available, 503 otherwise.
@@ -115,7 +118,7 @@ async def health_check():
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics() -> PlainTextResponse:
     """
     Prometheus metrics endpoint.
     Exposes request metrics and WireGuard stats.
@@ -161,8 +164,12 @@ class PeerResponse(BaseModel):
 # --- Endpoints ---
 
 
-@app.get("/peers", dependencies=[Depends(get_token_header)], response_model=list[dict])
-async def list_peers():
+@app.get(
+    "/peers",
+    dependencies=[Depends(get_token_header)],
+    response_model=list[dict[str, Any]],
+)
+async def list_peers() -> list[dict[str, Any]]:
     peers = wg.list_peers()
     # Convert dict to list response
     result = []
@@ -178,7 +185,9 @@ async def list_peers():
     status_code=status.HTTP_201_CREATED,
     response_model=None,
 )
-async def create_peer(peer: PeerCreate, format: str = "json"):
+async def create_peer(
+    peer: PeerCreate, format: str = "json"
+) -> PeerResponse | Response:
     priv_key = None
     pub_key = peer.public_key
 
@@ -264,7 +273,7 @@ PersistentKeepalive = 25
 
 
 @app.get("/peers/{public_key}", dependencies=[Depends(get_token_header)])
-async def get_peer(public_key: str):
+async def get_peer(public_key: str) -> dict[str, Any]:
     peers = wg.list_peers()
     if public_key not in peers:
         raise HTTPException(status_code=404, detail="Peer not found")
@@ -279,7 +288,7 @@ async def get_peer(public_key: str):
     dependencies=[Depends(get_token_header)],
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_peer(public_key: str):
+async def delete_peer(public_key: str) -> None:
     # Check existence
     peers = wg.list_peers()
     if public_key not in peers:
@@ -294,7 +303,7 @@ async def delete_peer(public_key: str):
 
 
 @app.get("/peers/{public_key}/config", dependencies=[Depends(get_token_header)])
-async def get_peer_config(public_key: str):
+async def get_peer_config(public_key: str) -> dict[str, str]:
     """
     Returns a basic configuration for the client.
     """

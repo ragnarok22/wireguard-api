@@ -1,9 +1,8 @@
 import re
 import time
-from collections.abc import Callable
 
 from prometheus_client import Counter, Gauge, Histogram
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -72,7 +71,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(
-        self, request: Request, call_next: Callable[[Request], Response]
+        self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         # Skip metrics for /metrics and /health endpoints to avoid recursion
         if request.url.path in ("/metrics", "/health"):
@@ -117,14 +116,14 @@ def update_wireguard_metrics(wg: WireGuard) -> None:
             try:
                 rx_bytes = int(data.get("transfer_rx", 0))
                 PEER_TRANSFER_RX.labels(public_key=public_key).set(rx_bytes)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 PEER_TRANSFER_RX.labels(public_key=public_key).set(0)
 
             # Transfer TX (bytes)
             try:
                 tx_bytes = int(data.get("transfer_tx", 0))
                 PEER_TRANSFER_TX.labels(public_key=public_key).set(tx_bytes)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 PEER_TRANSFER_TX.labels(public_key=public_key).set(0)
 
             # Last handshake (convert epoch to seconds ago)
@@ -136,7 +135,7 @@ def update_wireguard_metrics(wg: WireGuard) -> None:
                 else:
                     # No handshake yet
                     PEER_LAST_HANDSHAKE.labels(public_key=public_key).set(-1)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 PEER_LAST_HANDSHAKE.labels(public_key=public_key).set(-1)
 
     except Exception:
