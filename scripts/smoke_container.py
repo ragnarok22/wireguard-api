@@ -144,8 +144,17 @@ def smoke_test(image: str) -> None:
         command("volume", "create", volume)
         command("network", "create", network)
         start_server()
+        command(
+            "exec",
+            name,
+            "python",
+            "-c",
+            "import sys; assert sys.version_info >= (3, 14); "
+            "import api, routes, health, metrics, wireguard, storage, settings, "
+            "models, service, errors, keys, configuration, version, bootstrap",
+        )
         assert request("/v1/peers", auth=None)[0] == 401
-        assert request("/v1/peers", auth="invalid")[0] in (401, 403)
+        assert request("/v1/peers", auth="invalid")[0] == 403
         assert json.loads(request("/v1/peers")[1]) == {"items": [], "next_cursor": None}
         server_key = json.loads(request("/v1/server")[1])["public_key"]
         assert server_key == command("exec", name, "wg", "show", "wgtest", "public-key")
@@ -197,7 +206,16 @@ def smoke_test(image: str) -> None:
         assert request(f"{external_path}/config-template")[0] == 200
         status, content = request("/v1/peers")
         assert status == 200 and len(json.loads(content)["items"]) == 2
-        assert request("/metrics", auth=None)[0] == 200
+
+        def metrics_ready() -> bool:
+            status, content = request("/metrics", auth=None)
+            return (
+                status == 200
+                and "wireguard_peers_total 2.0" in content
+                and "wireguard_available 1.0" in content
+            )
+
+        wait_for(metrics_ready, "fresh available peer metrics")
 
         # Both helpers use the same tested image but bypass /init/bootstrap.
         command(
@@ -307,7 +325,7 @@ def smoke_test(image: str) -> None:
         raise
     finally:
         for args in (
-            ("rm", "--force", name, client, target),
+            ("rm", "--force", "--volumes", name, client, target),
             ("network", "rm", network),
             ("volume", "rm", volume),
         ):
