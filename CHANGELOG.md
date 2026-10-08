@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0-rc.1] - 2026-10-08
+
+This is an evaluation release candidate for 0.9.0, with breaking changes from
+0.4.2. Pin `0.9.0-rc.1` or its published digest; prereleases do not update moving
+image aliases. The stable 1.x compatibility policy starts with 1.0.0.
+
+### Upgrade and recovery
+- Stop the old service and back up its **entire data directory** before upgrading. Preserve `server_private.key`, match the existing interface and server address/pool, and provide a strong `API_TOKEN` plus the real reachable `SERVER_ENDPOINT`.
+- Update management clients to authenticated `/v1` routes, UUID IDs, `key_mode` and `Idempotency-Key`. Generated client credentials are returned once and cannot be recovered by retrying; save them securely.
+- The tested legacy upgrade path is v0.4.2. Roll back with the **pre-upgrade full-directory checkpoint and old image**, not the migrated directory or stale legacy JSON. See the [upgrade, backup and rollback procedures](https://github.com/ragnarok22/wireguard-api/blob/v0.9.0-rc.1/README.md#upgrading-an-existing-deployment).
+
 ### Changed
 - **Breaking API refactor**: Replace unversioned peer routes and public-key URLs with authenticated `/v1` routes and UUID peer/operation IDs. Creation requires `key_mode` and `Idempotency-Key`; lists return `items` and `next_cursor`. Replace `?format=config` and partial configuration responses with one-time generated JSON credentials and a full private-key-placeholder template.
 - **Breaking node ownership**: Manage one exclusive IPv4 WireGuard interface and a `/16`–`/30` client pool, with one client `/32` per peer. Reconciliation removes unmanaged peers. Client configurations route only `0.0.0.0/0`; IPv6 and preshared keys are unsupported.
@@ -29,10 +40,13 @@ All notable changes to this project will be documented in this file.
 - **Quality checks**: Strict mypy checks, centralized pytest configuration, and branch coverage reporting with a 100% coverage floor.
 - **Unit coverage**: Expand coverage across application composition/routes, service, storage/locking/migration, bootstrap/adapter, settings/contracts, monitoring, and release metadata. Isolate tests from local `.env` files and `/config`, using fake backends and temporary storage.
 - **Container verification**: Deployment checks and smoke tests for authenticated `/v1` operations, monitoring, generated configurations/templates, a real WireGuard handshake, tunneled traffic through NAT, container recreation, deletion, and preserved server identity.
+- **Startup and recovery regressions**: Verify default and custom WireGuard interfaces, invalid authentication rejection, token rotation, restrictive server-key permissions/ownership, temporary-file cleanup, repeatable firewall repair and essential-command failure recovery. Verify crash recovery, full-directory backup restoration and legacy rollback with real client traffic.
+- **Published-artifact verification**: Independently pull and test Docker Hub and GHCR digests on native amd64/arm64; require both architectures in each index and matching product/OpenAPI/health/runtime versions plus OCI version/revision labels. Release notes include the versioned changelog before automatic notes.
 - **Dependency maintenance**: Renovate configuration for Python, lockfiles, GitHub Actions, and Docker images.
 - **Build context**: `.dockerignore` excludes local environment files, configuration, and development artifacts.
 
 ### Fixed
+- **Secret-free startup diagnostics**: Hide submitted authentication values from configuration validation errors, including when another required setting is absent.
 - **Mutation reporting**: Verify kernel application before reporting success; retain durable pending intent and reserved addresses on backend failures. Idempotent replays return the original peer/operation without regenerating or replaying credentials; mismatched requests and revoked originals return `409`.
 - **Credential recovery expectations**: Generated client private keys are never stored or recoverable through retries/templates. A lost creation response requires revoking the original allocation and creating a replacement with a new idempotency key.
 - **Observability**: Avoid stale successful snapshots and false empty inventories on backend failure; remove stale per-peer series, bound request labels with route templates, and measure complete streaming responses.
