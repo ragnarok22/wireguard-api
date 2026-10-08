@@ -160,7 +160,7 @@ def smoke_test(image: str) -> None:
             candidate_path = f"/v1/peers/{candidate['id']}"
             assert request(candidate_path, "DELETE")[0] in (202, 204)
             wait_for(
-                lambda: (
+                lambda candidate=candidate, candidate_path=candidate_path: (
                     candidate["public_key"] not in peer_keys()
                     and request(candidate_path)[0] == 404
                 ),
