@@ -1,6 +1,6 @@
 [project]
 name = "wireguard-api"
-version = "0.9.0"
+version = "1.0.0-rc.1"
 description = "WireGuard VPN node with a REST API for peer management"
 authors = [
     {name = "Reinier Hernández", email = "sasuke.reinier@gmail.com"},

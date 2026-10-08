@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-10-08
+
+Evaluation candidate for the first stable 1.0.0 release. The application contract
+and storage format are unchanged from verified 0.9.0. This candidate is published
+under its exact version only; `latest` and stable major/minor aliases stay on
+their previously verified releases. Final 1.0.0 requires a passing representative
+48-hour soak and an explicit go/no-go review in issue #20.
+
+### Supported scope
+- One exclusively owned IPv4 WireGuard interface, one `/16`–`/30` pool, one `/32` per peer and full-tunnel `0.0.0.0/0` client routing. IPv6, preshared keys and shared interface ownership are unsupported.
+- Authenticated `/v1` UUID peer/operation resources, durable idempotency and verified reconciliation. Generated credentials are returned once; matching retries return identity without credentials. Public `/livez`, `/readyz` and `/metrics` retain the documented schemas and availability semantics.
+- Explicit required token/endpoint, single worker, persistent server identity and SQLite desired state. Native amd64/arm64 artifacts are verified by published digest in both registries before GitHub prerelease creation.
+- The documented stable 1.x compatibility/deprecation policy becomes a release guarantee with final 1.0.0; this is still a prerelease evaluation build.
+
+### Upgrade and recovery
+- From 0.9.0, stop the service and back up the entire data directory plus deployment settings; keep the same token, endpoint, server key, interface and pool. No API or storage migration is introduced by this candidate.
+- From v0.4.2, follow the breaking `/v1` client migration and all-or-nothing legacy inventory import. Preserve the original server key and full pre-upgrade checkpoint. Old unversioned routes and `/health` are unsupported.
+- Rollback/restoration uses the checkpoint and matching previous image, never stale legacy JSON or an overlaid database directory. See the [tested upgrade/backup/rollback procedures](https://github.com/ragnarok22/wireguard-api/blob/v1.0.0-rc.1/README.md#upgrading-an-existing-deployment).
+
+### Validation
+- Contract/compatibility, recovery and secure operations acceptance reviews are complete (#9, #18 and #16), including a fresh default Compose deployment.
+- The candidate release workflow runs strict quality checks, 100% statement/branch coverage, native bootstrap/tunnel tests and upgrade/backup/restoration/rollback verification on both architectures and registries.
+- The 48-hour operational soak is tracked separately in [#20](https://github.com/ragnarok22/wireguard-api/issues/20); publication of this candidate does not itself declare the soak complete or authorize a final go decision.
+
 ## [0.9.0] - 2026-10-08
 
 Promotes the verified 0.9.0-rc.1 application to a non-prerelease 0.9.0 release.
