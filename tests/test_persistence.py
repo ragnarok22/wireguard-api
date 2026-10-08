@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -40,6 +41,34 @@ def test_write_denied_reports_failure_without_losing_reservation(tmp_path, monke
             store.complete_operation(operation.id)
     assert store.get_peer(peer.id) == peer
     assert store.get_operation(operation.id) == operation
+
+
+def test_database_is_private_before_sqlite_creates_schema(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    real_connect = sqlite3.connect
+    observed = []
+
+    def inspect_permissions(*args, **kwargs):
+        # SQLite must never create a briefly world-readable database.
+        assert store.path.exists()
+        observed.append(store.path.stat().st_mode & 0o777)
+        assert observed[-1] == 0o600
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr("storage.sqlite3.connect", inspect_permissions)
+    old_umask = os.umask(0)
+    try:
+        store.initialize()
+    finally:
+        os.umask(old_umask)
+    assert observed == [0o600]
+
+
+@pytest.mark.parametrize("interface", ["", "-wg0", "a" * 16, "wg/0", "wg 0", "wg0\n"])
+def test_invalid_interface_rejected_before_creating_storage(tmp_path, interface):
+    with pytest.raises(StorageError, match="interface"):
+        Store(tmp_path / "peers.db", interface, "10.0.0.1/24")
+    assert not (tmp_path / "peers.db").exists()
 
 
 def test_corrupt_legacy_is_never_overwritten_or_partially_imported(tmp_path):
@@ -440,17 +469,76 @@ def test_concurrent_reservation_has_one_winner(tmp_path):
     assert len(store.list_peers()) == store.pending_count() == 1
 
 
-def test_lock_io_failure_and_chmod_failure_are_reported(tmp_path, monkeypatch):
+def test_lock_io_failure_is_reported(tmp_path, monkeypatch):
     store = store_at(tmp_path)
     with monkeypatch.context() as patch:
-        patch.setattr("storage.os.open", Mock(side_effect=PermissionError("secret")))
+        patch.setattr(
+            "storage_lock.os.open", Mock(side_effect=PermissionError("secret"))
+        )
         with pytest.raises(StorageError, match="lock unavailable"):
             store.initialize()
-    with monkeypatch.context() as patch:
-        patch.setattr(Path, "chmod", Mock(side_effect=PermissionError("secret")))
-        with pytest.raises(StorageError, match="permissions"):
-            store.initialize()
     store.initialize()
+
+
+@pytest.mark.parametrize("failure", ["open", "chmod"])
+def test_database_permission_failure_prevents_initialization(
+    tmp_path, monkeypatch, failure
+):
+    store = store_at(tmp_path)
+    real_open = os.open
+    real_fchmod = os.fchmod
+
+    def deny_database_open(path, *args, **kwargs):
+        if Path(path) == store.path:
+            raise PermissionError("private diagnostic")
+        return real_open(path, *args, **kwargs)
+
+    def deny_database_chmod(fd, mode):
+        if store.path.exists() and os.fstat(fd).st_ino == store.path.stat().st_ino:
+            raise PermissionError("private diagnostic")
+        return real_fchmod(fd, mode)
+
+    with monkeypatch.context() as patch:
+        if failure == "open":
+            patch.setattr("storage.os.open", deny_database_open)
+        else:
+            patch.setattr("storage.os.fchmod", deny_database_chmod)
+        connect = Mock()
+        patch.setattr("storage.sqlite3.connect", connect)
+        with pytest.raises(
+            StorageError, match="^Cannot restrict peer storage permissions$"
+        ):
+            store.initialize()
+        connect.assert_not_called()
+    store.initialize()
+    store.health_check()
+
+
+def test_existing_database_permissions_restricted_before_reopen(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, operation = store.create_peer(key(), "10.0.0.2")
+    store.path.chmod(0o666)
+    real_connect = sqlite3.connect
+
+    def inspect_permissions(*args, **kwargs):
+        assert store.path.stat().st_mode & 0o777 == 0o600
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr("storage.sqlite3.connect", inspect_permissions)
+    store.initialize()
+    assert store.get_peer(peer.id) == peer
+    assert store.get_operation(operation.id) == operation
+
+
+@pytest.mark.parametrize("interface", ["wg0", "a", "w" * 15, "wg-test.1", "_wg0"])
+def test_valid_interface_and_canonical_network_identity(tmp_path, interface):
+    store = Store(tmp_path / "peers.db", interface, "10.0.0.1/255.255.255.0")
+    store.initialize()
+    assert store.server_address == "10.0.0.1/24"
+    reopened = Store(store.path, interface, "10.0.0.1/24")
+    reopened.initialize()
+    reopened.health_check()
 
 
 def test_deleting_record_without_intent_is_rejected(tmp_path):

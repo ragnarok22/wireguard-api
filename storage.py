@@ -5,15 +5,13 @@ Repository writes themselves use short SQLite transactions. Operation history
 deliberately has no peer foreign key: successful deletion retains that history.
 """
 
-import fcntl
 import ipaddress
-import json
 import os
+import re
 import sqlite3
-import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Literal
@@ -21,6 +19,8 @@ from uuid import uuid4
 
 from errors import ConflictError, NotFoundError, StorageError
 from keys import validate_key
+from legacy import client_address, read_legacy
+from storage_lock import StorageLock
 
 
 @dataclass(frozen=True)
@@ -71,15 +71,6 @@ _SCHEMA = (
 )
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for name, value in pairs:
-        if name in result:
-            raise ValueError("Duplicate legacy JSON key")
-        result[name] = value
-    return result
-
-
 class Store:
     def __init__(
         self,
@@ -90,6 +81,9 @@ class Store:
         lock_timeout: float = 5.0,
     ) -> None:
         self.path = path.absolute()
+        # Match Settings without coupling persistence to its environment loader.
+        if re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,14}", interface) is None:
+            raise StorageError("Invalid storage interface name")
         self.interface = interface
         try:
             self._server = ipaddress.IPv4Interface(server_address)
@@ -97,61 +91,30 @@ class Store:
             raise StorageError("Invalid storage network identity") from exc
         self.server_address = str(self._server)
         self.legacy_path = legacy_path
-        if not 0 <= lock_timeout < float("inf"):
-            raise StorageError("Invalid storage lock timeout")
         self.lock_timeout = lock_timeout
-        self._thread_lock = threading.RLock()
-        self._lock_depth = 0
+        self._lock = StorageLock(Path(str(self.path) + ".lock"), lock_timeout)
 
-    @contextmanager
-    def lock(self) -> Iterator[None]:
-        """Reentrant per instance; stable flock inode also excludes other processes."""
-        deadline = time.monotonic() + self.lock_timeout
-        if not self._thread_lock.acquire(timeout=self.lock_timeout):
-            raise StorageError("Storage lock timed out")
+    def lock(self) -> AbstractContextManager[None]:
+        return self._lock.acquire()
+
+    def _secure_database(self) -> None:
+        """Create without truncation; restrict permissions before SQLite writes."""
         try:
-            if self._lock_depth:
-                self._lock_depth += 1
-                try:
-                    yield
-                finally:
-                    self._lock_depth -= 1
-                return
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(
-                    str(self.path) + ".lock",
-                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-                    0o600,
-                )
-                with os.fdopen(fd, "r+b") as lock_file:
-                    os.fchmod(lock_file.fileno(), 0o600)
-                    while True:
-                        try:
-                            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            if time.monotonic() >= deadline:
-                                raise StorageError("Storage lock timed out") from None
-                            time.sleep(min(0.01, max(0, deadline - time.monotonic())))
-                    self._lock_depth = 1
-                    try:
-                        yield
-                    finally:
-                        self._lock_depth = 0
-            except OSError as exc:
-                raise StorageError("Storage lock unavailable") from exc
-        finally:
-            self._thread_lock.release()
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "r+b") as database_file:
+                os.fchmod(database_file.fileno(), 0o600)
+        except OSError as exc:
+            raise StorageError("Cannot restrict peer storage permissions") from exc
 
     @contextmanager
     def _connection(
         self, *, write: bool = False, initialize: bool = False
     ) -> Iterator[sqlite3.Connection]:
         try:
-            mode = "rwc" if initialize else "rw"
+            if initialize:
+                self._secure_database()
             connection = sqlite3.connect(
-                self.path.as_uri() + f"?mode={mode}",
+                self.path.as_uri() + "?mode=rw",
                 uri=True,
                 timeout=self.lock_timeout,
                 isolation_level=None,
@@ -212,13 +175,9 @@ class Store:
                     )
                 ):
                     raise StorageError("Untracked inventory cannot be migrated safely")
-                for public_key, address in self._legacy_peers():
+                for public_key, address in read_legacy(self.legacy_path, self._server):
                     self._insert_peer(connection, public_key, address, None, None)
                 connection.execute("UPDATE metadata SET migrated = 1")
-        try:
-            self.path.chmod(0o600)
-        except OSError as exc:
-            raise StorageError("Cannot restrict peer storage permissions") from exc
 
     def _check_identity(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute(
@@ -235,51 +194,6 @@ class Store:
     def _quick_check(connection: sqlite3.Connection) -> None:
         if [row[0] for row in connection.execute("PRAGMA quick_check")] != ["ok"]:
             raise StorageError("Peer storage integrity check failed")
-
-    def _address(self, address: str) -> str:
-        client = ipaddress.IPv4Interface(address)
-        network = self._server.network
-        if (
-            client.network.prefixlen != 32
-            or client.ip not in network
-            or client.ip
-            in (self._server.ip, network.network_address, network.broadcast_address)
-        ):
-            raise ValueError("Expected an available IPv4 client address")
-        return str(client.ip)
-
-    def _legacy_peers(self) -> list[tuple[str, str]]:
-        if self.legacy_path is None:
-            return []
-        try:
-            text = self.legacy_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return []
-        except (OSError, UnicodeError) as exc:
-            raise StorageError("Cannot read legacy inventory") from exc
-        try:
-            inventory = json.loads(text, object_pairs_hook=_unique_object)
-            if not isinstance(inventory, dict):
-                raise ValueError("Expected a legacy inventory object")
-            peers: list[tuple[str, str]] = []
-            addresses: set[str] = set()
-            for public_key, data in inventory.items():
-                validate_key(public_key)
-                if not isinstance(data, dict) or set(data) != {"allowed_ips"}:
-                    raise ValueError("Invalid legacy peer record")
-                ips = data["allowed_ips"]
-                if not isinstance(ips, list) or len(ips) != 1:
-                    raise ValueError("Expected one legacy client address")
-                if not isinstance(ips[0], str) or not ips[0].endswith("/32"):
-                    raise ValueError("Expected an IPv4 /32")
-                address = self._address(ips[0])
-                if address in addresses:
-                    raise ValueError("Duplicate legacy client address")
-                addresses.add(address)
-                peers.append((public_key, address))
-            return peers
-        except ValueError as exc:
-            raise StorageError("Invalid legacy inventory; original preserved") from exc
 
     @staticmethod
     def _insert_peer(
@@ -382,7 +296,7 @@ class Store:
         fingerprint: str | None = None,
     ) -> tuple[PeerRecord, OperationRecord]:
         validate_key(public_key)
-        address = self._address(address)
+        address = client_address(address, self._server)
         try:
             with self._connection(write=True) as connection:
                 return self._insert_peer(
