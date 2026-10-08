@@ -1,51 +1,36 @@
+"""Readiness requires durable storage and convergence, not an empty inventory."""
+
 import time
+from typing import Literal
 
 from pydantic import BaseModel
 
-from wireguard import WireGuard
+from errors import ControlPlaneError
+from service import PeerService
+from version import VERSION
 
-# Track application start time
-_start_time = time.time()
 
-
-class HealthStatus(BaseModel):
-    status: str
+class ReadinessStatus(BaseModel):
+    status: Literal["ready", "not_ready"]
     version: str
     uptime_seconds: float
-    wireguard_interface: str
-    wireguard_available: bool
-    peer_count: int
+    interface: str
+    reason: str | None
 
 
-def check_health(wg: WireGuard, version: str) -> tuple[HealthStatus, int]:
-    """
-    Check the health of the WireGuard API service.
-
-    Returns a tuple of (HealthStatus, HTTP status code).
-    Returns 200 if healthy, 503 if unhealthy.
-    """
-    uptime = time.time() - _start_time
-    wireguard_available = False
-    peer_count = 0
-
+def readiness(service: PeerService) -> ReadinessStatus:
+    reason = None
     try:
-        peers = wg.list_peers()
-        wireguard_available = True
-        peer_count = len(peers)
-    except Exception:
-        wireguard_available = False
-
-    status = "healthy" if wireguard_available else "unhealthy"
-    http_code = 200 if wireguard_available else 503
-
-    return (
-        HealthStatus(
-            status=status,
-            version=version,
-            uptime_seconds=round(uptime, 1),
-            wireguard_interface=wg.interface,
-            wireguard_available=wireguard_available,
-            peer_count=peer_count,
-        ),
-        http_code,
+        ready = service.is_ready()
+        if not ready:
+            reason = "state_not_converged"
+    except ControlPlaneError as exc:
+        ready = False
+        reason = exc.code
+    return ReadinessStatus(
+        status="ready" if ready else "not_ready",
+        version=VERSION,
+        uptime_seconds=round(time.monotonic() - service.started_at, 1),
+        interface=service.settings.interface,
+        reason=reason,
     )

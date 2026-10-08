@@ -6,7 +6,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from configuration import client_config
 from errors import (
@@ -52,7 +52,9 @@ def test_keys_reject_noncanonical_or_wrong_length(value: str) -> None:
 
 
 def test_create_modes_and_address_serialization() -> None:
-    generated = PeerCreate(key_mode="generated", public_key=None, address="10.13.13.2")
+    generated = PeerCreate.model_validate(
+        {"key_mode": "generated", "public_key": None, "address": "10.13.13.2"}
+    )
     assert generated.public_key is None
     assert generated.address == IPv4Address("10.13.13.2")
     assert '"address":"10.13.13.2"' in generated.model_dump_json()
@@ -92,18 +94,21 @@ def test_create_rejects_invalid_modes_keys_and_extra_fields(
     [
         {"key_mode": b"generated"},
         {"key_mode": "external", "public_key": KEY.encode()},
-        {"key_mode": "generated", "address": 167772162},
+        {"key_mode": "generated", "address": int(IPv4Address("10.13.13.2"))},
         {"key_mode": "generated", "address": True},
     ],
+    ids=["bytes-mode", "bytes-public-key", "integer-address", "boolean-address"],
 )
-def test_create_rejects_non_json_contract_types(values: dict[str, object]) -> None:
+def test_create_rejects_invalid_field_types(values: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         PeerCreate.model_validate(values)
 
 
 def test_configuration_full_ipv4_template() -> None:
     settings = Settings(
-        api_token="test-secret", server_endpoint="node.example.org:443", dns="9.9.9.9"
+        api_token=SecretStr("test-secret"),
+        server_endpoint="node.example.org:443",
+        dns=IPv4Address("9.9.9.9"),
     )
     expected = (
         "[Interface]\nPrivateKey = <YOUR_PRIVATE_KEY>\n"

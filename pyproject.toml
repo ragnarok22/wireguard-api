@@ -47,12 +47,20 @@ pythonpath = ["."]
 
 [tool.mypy]
 python_version = "3.14"
-files = ["api.py", "health.py", "metrics.py", "wireguard.py"]
+files = [
+    "api.py", "routes.py", "health.py", "metrics.py", "wireguard.py", "storage.py",
+    "storage_lock.py", "legacy.py", "settings.py", "models.py", "service.py",
+    "errors.py", "keys.py", "configuration.py", "version.py", "bootstrap.py",
+]
 strict = true
 
 [tool.coverage.run]
 branch = true
-source = ["api", "health", "metrics", "wireguard"]
+source = [
+    "api", "routes", "health", "metrics", "wireguard", "storage", "storage_lock",
+    "legacy", "settings", "models", "service", "errors", "keys", "configuration",
+    "version", "bootstrap",
+]
 
 [tool.coverage.report]
 show_missing = true

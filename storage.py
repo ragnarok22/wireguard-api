@@ -34,10 +34,12 @@ class PeerRecord:
 
 @dataclass(frozen=True)
 class OperationRecord:
+    """Only applied intents complete; deletion cancels a superseded pending create."""
+
     id: str
     peer_id: str
     kind: Literal["create", "delete"]
-    status: Literal["pending", "complete"]
+    status: Literal["pending", "complete", "cancelled"]
     public_key: str
     address: str
     error: str | None
@@ -61,7 +63,7 @@ _SCHEMA = (
     """CREATE TABLE operations (
         id TEXT PRIMARY KEY, peer_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('create','delete')),
-        status TEXT NOT NULL CHECK(status IN ('pending','complete')),
+        status TEXT NOT NULL CHECK(status IN ('pending','complete','cancelled')),
         public_key TEXT NOT NULL, address TEXT NOT NULL, error TEXT,
         created_at REAL NOT NULL, request_key TEXT UNIQUE, fingerprint TEXT
     )""",
@@ -327,8 +329,8 @@ class Store:
                     raise StorageError("Deleting peer has no pending operation")
                 return OperationRecord(**dict(row))
             connection.execute(
-                "UPDATE operations SET status = 'complete' "
-                "WHERE peer_id = ? AND status = 'pending'",
+                "UPDATE operations SET status = 'cancelled', error = NULL "
+                "WHERE peer_id = ? AND kind = 'create' AND status = 'pending'",
                 (peer_id,),
             )
             operation = OperationRecord(
@@ -367,7 +369,7 @@ class Store:
             if row is None:
                 raise NotFoundError("Operation not found")
             operation = OperationRecord(**dict(row))
-            if operation.status == "complete":
+            if operation.status != "pending":
                 return
             if operation.kind == "create":
                 connection.execute(

@@ -8,11 +8,17 @@ from dataclasses import replace
 from ipaddress import IPv4Address
 
 from configuration import client_config
-from errors import ConflictError, ControlPlaneError, InputError, NotFoundError
+from errors import (
+    ConflictError,
+    ControlPlaneError,
+    InputError,
+    NotFoundError,
+    WireGuardError,
+)
 from models import CreateResult, PeerCreate, PeerPage, PeerView, ServerView
 from settings import Settings
 from storage import OperationRecord, PeerRecord, Store
-from wireguard import Snapshot, WireGuard, WireGuardError
+from wireguard import Snapshot, WireGuard
 
 logger = logging.getLogger(__name__)
 

@@ -1,340 +1,149 @@
+"""Application composition. Run with ``uvicorn api:create_app --factory``."""
+
+import asyncio
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
 
-from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from fastapi.security import APIKeyHeader
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
 
-from health import HealthStatus, check_health
-from metrics import MetricsMiddleware, update_wireguard_metrics
-from wireguard import WireGuard, WireGuardError
+from errors import ControlPlaneError
+from health import ReadinessStatus, readiness
+from metrics import Metrics, MetricsMiddleware
+from models import ErrorResponse
+from routes import build_router
+from service import PeerService
+from settings import Settings
+from storage import Store
+from version import VERSION
+from wireguard import WireGuard
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("wireguard-api")
-
-load_dotenv()
-
-# Token uses by master to send commands to this node
-TOKEN = os.getenv("API_TOKEN")
-WG_INTERFACE = os.getenv("WG_INTERFACE", "wg0")
+logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Startup: restore peers
-    try:
-        wg.restore_peers()
-    except Exception as e:
-        logger.warning(
-            f"Failed to restore peers on startup (might be expected on first run): {e}"
-        )
-    yield
-
-
-app = FastAPI(title="Wireguard API", version="0.4.2", lifespan=lifespan)
-app.add_middleware(MetricsMiddleware)
-wg = WireGuard(interface=WG_INTERFACE)
-
-
-# --- Exception Handlers ---
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal Server Error"},
-    )
-
-
-# --- Dependencies ---
-header_scheme = APIKeyHeader(name="X-API-Token")
-
-
-async def get_token_header(
-    x_api_token: Annotated[str, Depends(header_scheme)],
-) -> None:
-    if x_api_token != TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid authentication token",
-        )
-
-
-def _get_server_endpoint() -> str:
-    """
-    Retrieves SERVER_ENDPOINT from env and ensures it has a port.
-    Defaults to 51820 if port is missing.
-    """
-    endpoint = os.getenv("SERVER_ENDPOINT", "vpn.example.com:51820")
-
-    # Simple check for port: look for colon
-    # Note: IPv6 addresses contain colons, so this is simplistic but works for host:port
-    # A robust check would require parsing.
-    # Assumption: if it has no colon, it needs port.
-    # If it has colon but it's IPv6 (brackets?), we need care.
-    # Standard format: [ipv6]:port or ipv4:port or domain:port
-
-    if "]:" in endpoint:
-        # IPv6 with port
-        return endpoint
-
-    # Count colons to distinguish IPv6 from IPv4/Domain with port
-    colons = endpoint.count(":")
-
-    if colons == 0:
-        # Domain or IPv4 without port
-        return f"{endpoint}:51820"
-
-    if colons > 1 and "]" not in endpoint:
-        # Naked IPv6 address without brackets/port? WireGuard expects [IPv6]:port
-        # If user provided raw naked IPv6, we assume they meant that as host.
-        # But technically we cannot easily distinguish domain with port (rare cols)
-        # from raw IPv6.
-        # For safety/simplicity: assume existing env is mostly correct,
-        # just fix the obvious "missing port" case for IPv4/Domains.
-        pass
-
-    return endpoint
-
-
-# --- Monitoring Endpoints (no auth required) ---
-
-
-@app.get("/health", response_model=HealthStatus)
-async def health_check() -> JSONResponse:
-    """
-    Health check endpoint for liveness/readiness probes.
-    Returns 200 if WireGuard is available, 503 otherwise.
-    """
-    health_status, http_code = check_health(wg, app.version)
-    return JSONResponse(content=health_status.model_dump(), status_code=http_code)
-
-
-@app.get("/metrics")
-async def metrics() -> PlainTextResponse:
-    """
-    Prometheus metrics endpoint.
-    Exposes request metrics and WireGuard stats.
-    """
-    update_wireguard_metrics(wg)
-    return PlainTextResponse(
-        content=generate_latest().decode("utf-8"),
-        media_type=CONTENT_TYPE_LATEST,
-    )
-
-
-# --- Models ---
-
-
-class Peer(BaseModel):
-    public_key: str
-    preshared_key: str = "(hidden)"
-    endpoint: str
-    allowed_ips: list[str]
-    latest_handshake: str
-    transfer_rx: str
-    transfer_tx: str
-    persistent_keepalive: str
-
-
-class PeerCreate(BaseModel):
-    public_key: str | None = Field(
-        None,
-        description="Public key of the peer. If not provided, one will be generated.",
-    )
-    allowed_ips: list[str] | None = Field(
-        None, description="Allowed IPs. If None, one will be allocated automatically."
-    )
-
-
-class PeerResponse(BaseModel):
-    public_key: str
-    allowed_ips: list[str]
-    # If we generated keys, we return private key (ONLY ONCE)
-    private_key: str | None = None
-
-
-# --- Endpoints ---
-
-
-@app.get(
-    "/peers",
-    dependencies=[Depends(get_token_header)],
-    response_model=list[dict[str, Any]],
-)
-async def list_peers() -> list[dict[str, Any]]:
-    peers = wg.list_peers()
-    # Convert dict to list response
-    result = []
-    for pub_key, data in peers.items():
-        data["public_key"] = pub_key
-        result.append(data)
-    return result
-
-
-@app.post(
-    "/peers",
-    dependencies=[Depends(get_token_header)],
-    status_code=status.HTTP_201_CREATED,
-    response_model=None,
-)
-async def create_peer(
-    peer: PeerCreate, format: str = "json"
-) -> PeerResponse | Response:
-    priv_key = None
-    pub_key = peer.public_key
-
-    if not pub_key:
-        priv_key, pub_key = wg.gen_keys()
-
-    if not peer.allowed_ips:
+async def reconciliation_loop(service: PeerService, stop: asyncio.Event) -> None:
+    while not stop.is_set():
         try:
-            # 1. Get current subnet (e.g. 10.13.13.1/24)
-            subnet = wg.get_interface_subnet()
-            # 2. Get list of used IPs from existing peers
-            peers = wg.list_peers()
-            used_ips = set()
-            for p in peers.values():
-                # Each peer has a list of allowed_ips (str) like "10.0.0.2/32,..."
-                for ip_cidr in p.get("allowed_ips", []):
-                    # Store just the IP part, ignoring /32
-                    used_ips.add(ip_cidr.split("/")[0])
-
-            # 3. Allocate next
-            new_ip = wg.allocate_next_ip(subnet, used_ips)
-            # Assign as /32 (single host)
-            peer.allowed_ips = [f"{new_ip}/32"]
-            logger.info(f"Allocated new IP {new_ip} for peer {pub_key}")
-
-        except WireGuardError as e:
-            logger.error(f"Failed to allocate IP: {e}")
-            raise HTTPException(
-                status_code=500, detail=f"IP Allocation failed: {e}"
-            ) from e
-
-    try:
-        wg.create_peer(pub_key, peer.allowed_ips)
-    except WireGuardError as e:
-        logger.error(f"Failed to create peer: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-    if format == "config":
-        if not priv_key:
-            # We can't generate full config if we didn't generate the keys
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Cannot generate config when public_key is provided. "
-                    "Private key is unknown."
-                ),
+            await asyncio.wait_for(
+                stop.wait(), timeout=service.settings.reconcile_interval
             )
-
-        server_pub_key = os.getenv("SERVER_PUBLIC_KEY", "SERVER_PUB_KEY_PLACEHOLDER")
-        if server_pub_key == "SERVER_PUB_KEY_PLACEHOLDER":
-            # Try to fetch real public key from interface
+        except TimeoutError:
             try:
-                # wg show wg0 public-key
-                server_pub_key = wg._run(["wg", "show", WG_INTERFACE, "public-key"])
-            except Exception as e:
-                logger.warning(f"Could not fetch server public key: {e}")
+                await run_in_threadpool(service.reconcile)
+            except ControlPlaneError:
+                logger.warning("WireGuard reconciliation will be retried")
 
-        server_endpoint = _get_server_endpoint()
 
-        # Taking the first allowed IP as the Interface Address (usually /32)
-        # If multiple are passed, we might just list them or take first.
-        # Standard WireGuard config takes 'Address'.
-        address = peer.allowed_ips[0]
+def create_app(
+    settings: Settings | None = None, service: PeerService | None = None
+) -> FastAPI:
+    configured = settings or (
+        service.settings if service is not None else Settings.load()
+    )
+    if service is None:
+        service = PeerService(
+            configured,
+            Store(
+                configured.data_dir / "peers.sqlite3",
+                configured.interface,
+                str(configured.server_address),
+                configured.data_dir / "peers.json",
+            ),
+            WireGuard(configured.interface, configured.command_timeout),
+        )
+    node = service
+    collector = Metrics()
 
-        config_content = f"""[Interface]
-PrivateKey = {priv_key}
-Address = {address}
-DNS = 1.1.1.1
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await run_in_threadpool(node.initialize)
+        stop = asyncio.Event()
+        task = asyncio.create_task(reconciliation_loop(node, stop))
+        try:
+            yield
+        finally:
+            stop.set()
+            await task
 
-[Peer]
-PublicKey = {server_pub_key}
-Endpoint = {server_endpoint}
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
-"""
-        return Response(
-            content=config_content, media_type="text/plain", status_code=201
+    app = FastAPI(title="WireGuard API", version=VERSION, lifespan=lifespan)
+    app.state.service = node
+    app.state.metrics = collector
+    app.add_middleware(MetricsMiddleware, metrics=collector)
+    app.include_router(build_router(node))
+
+    @app.exception_handler(ControlPlaneError)
+    async def control_error(request: Request, exc: ControlPlaneError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code, "detail": str(exc)},
         )
 
-    return PeerResponse(
-        public_key=pub_key, allowed_ips=peer.allowed_ips, private_key=priv_key
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": "http_error", "detail": str(exc.detail)},
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Validation payloads can contain submitted credentials. Publish locations,
+        # never echo values or the body, and keep the public error schema stable.
+        locations = ", ".join(
+            ".".join(map(str, error["loc"])) for error in exc.errors()
+        )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": "invalid_input",
+                "detail": f"Invalid request: {locations}",
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        logger.error("Unhandled control-plane error (%s)", type(exc).__name__)
+        return JSONResponse(
+            status_code=500,
+            content={"code": "internal_error", "detail": "Internal Server Error"},
+        )
+
+    @app.get("/livez", tags=["monitoring"])
+    async def live() -> dict[str, str]:
+        return {"status": "alive", "version": VERSION}
+
+    @app.get(
+        "/readyz",
+        response_model=ReadinessStatus,
+        responses={503: {"model": ReadinessStatus}},
+        tags=["monitoring"],
     )
+    def ready(response: Response) -> ReadinessStatus:
+        result = readiness(node)
+        response.status_code = 200 if result.status == "ready" else 503
+        return result
 
-
-@app.get("/peers/{public_key}", dependencies=[Depends(get_token_header)])
-async def get_peer(public_key: str) -> dict[str, Any]:
-    peers = wg.list_peers()
-    if public_key not in peers:
-        raise HTTPException(status_code=404, detail="Peer not found")
-
-    data = peers[public_key]
-    data["public_key"] = public_key
-    return data
-
-
-@app.delete(
-    "/peers/{public_key}",
-    dependencies=[Depends(get_token_header)],
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def delete_peer(public_key: str) -> None:
-    # Check existence
-    peers = wg.list_peers()
-    if public_key not in peers:
-        raise HTTPException(status_code=404, detail="Peer not found")
-
-    try:
-        wg.delete_peer(public_key)
-    except WireGuardError as e:
-        logger.error(f"Failed to delete peer: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    return None
-
-
-@app.get("/peers/{public_key}/config", dependencies=[Depends(get_token_header)])
-async def get_peer_config(public_key: str) -> dict[str, str]:
-    """
-    Returns a basic configuration for the client.
-    """
-    peers = wg.list_peers()
-    if public_key not in peers:
-        raise HTTPException(status_code=404, detail="Peer not found")
-
-    # peer_data = peers[public_key]
-    # allowed_ips = ",".join(peer_data['allowed_ips'])
-
-    server_pub_key = os.getenv("SERVER_PUBLIC_KEY", "SERVER_PUB_KEY_PLACEHOLDER")
-    if server_pub_key == "SERVER_PUB_KEY_PLACEHOLDER":
-        # Try to fetch real public key from interface
+    @app.get(
+        "/metrics", response_class=Response, responses={503: {"model": ErrorResponse}}
+    )
+    def metrics() -> Response:
         try:
-            # wg show wg0 public-key
-            server_pub_key = wg._run(["wg", "show", WG_INTERFACE, "public-key"])
-        except Exception as e:
-            logger.warning(f"Could not fetch server public key: {e}")
+            snapshot = node.snapshot()
+            pending = node.store.pending_count()
+        except ControlPlaneError:
+            snapshot = None
+            pending = -1
+        return Response(
+            content=collector.render(snapshot, pending),
+            headers={"Content-Type": CONTENT_TYPE_LATEST},
+        )
 
-    server_endpoint = _get_server_endpoint()
-
-    config = f"""
-# Client config (partial) - Add your PrivateKey to [Interface]
-
-[Peer]
-PublicKey = {server_pub_key}
-Endpoint = {server_endpoint}
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
-"""
-    return {
-        "config": config.strip(),
-        "note": "Add your private key to the interface section found in POST response",
-    }
+    return app

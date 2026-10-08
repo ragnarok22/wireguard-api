@@ -121,6 +121,7 @@ def test_lifecycle_durable_replay_history_and_pagination(tmp_path):
     assert reopened.get_operation(create.id).error is None
     delete = reopened.request_delete(peer.id)
     assert delete.kind == "delete"
+    assert reopened.get_operation(create.id).status == "complete"
     assert reopened.request_delete(peer.id) == delete
     assert reopened.get_peer(peer.id).state == "deleting"
     reopened.fail_operation(delete.id, "remove failed")
@@ -142,17 +143,35 @@ def test_lifecycle_durable_replay_history_and_pagination(tmp_path):
     assert reopened.get_peer(replacement.id) == replacement
 
 
-def test_delete_supersedes_pending_create_without_resurrection(tmp_path):
+@pytest.mark.parametrize("previous_failure", [False, True])
+def test_delete_supersedes_pending_create_without_resurrection(
+    tmp_path, previous_failure
+):
     store = store_at(tmp_path)
     store.initialize()
-    peer, create = store.create_peer(key(), "10.0.0.2")
+    peer, create = store.create_peer(key(), "10.0.0.2", "request", "fingerprint")
+    if previous_failure:
+        store.fail_operation(create.id, "kernel unavailable")
     delete = store.request_delete(peer.id)
     assert store.pending_operations() == [delete]
-    assert store.get_operation(create.id).status == "complete"
+    cancelled = store.get_operation(create.id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.error is None
+    assert store.find_request("request") == cancelled
+    assert cancelled.fingerprint == "fingerprint"
+    assert store.pending_count() == 1
     store.complete_operation(create.id)
+    store.fail_operation(create.id, "late create failure")
+    assert store.get_operation(create.id) == cancelled
     assert store.get_peer(peer.id).state == "deleting"
     store.complete_operation(delete.id)
     store.complete_operation(create.id)
+    store.fail_operation(create.id, "another late failure")
+    reopened = store_at(tmp_path)
+    reopened.initialize()
+    assert reopened.get_operation(create.id) == cancelled
+    assert reopened.get_operation(delete.id).status == "complete"
+    assert reopened.pending_count() == 0
     assert store.list_peers() == []
 
 
@@ -603,6 +622,36 @@ def test_commit_failure_keeps_pending_replay_and_releases_connection(
         assert store.get_peer(peer.id).state == "active"
     else:
         assert store.get_peer(peer.id) is None
+
+
+def test_failed_delete_request_keeps_original_create_intent(tmp_path, monkeypatch):
+    store = store_at(tmp_path)
+    store.initialize()
+    peer, create = store.create_peer(key(), "10.0.0.2", "request", "fingerprint")
+    store.fail_operation(create.id, "create not applied")
+    pending = store.get_operation(create.id)
+    real_connect = sqlite3.connect
+
+    class FailedCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError("disk full")
+
+    def failed(*args, **kwargs):
+        return real_connect(*args, **kwargs, factory=FailedCommit)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("storage.sqlite3.connect", failed)
+        with pytest.raises(StorageError):
+            store.request_delete(peer.id)
+    assert store.get_peer(peer.id) == peer
+    assert store.get_operation(create.id) == pending
+    assert store.find_request("request") == pending
+    assert store.latest_operation(peer.id) == pending
+    assert store.pending_operations() == [pending]
+    delete = store.request_delete(peer.id)
+    assert store.get_operation(create.id).status == "cancelled"
+    assert store.get_operation(create.id).error is None
+    assert store.pending_operations() == [delete]
 
 
 @pytest.mark.parametrize("table", ["peers", "operations"])

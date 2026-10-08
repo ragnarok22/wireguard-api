@@ -3,7 +3,7 @@
 from ipaddress import IPv4Address
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, StrictStr, field_validator, model_validator
 
 from keys import validate_key
 from storage import OperationRecord
@@ -14,8 +14,15 @@ class PeerCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key_mode: Literal["generated", "external"]
-    public_key: str | None = None
+    public_key: StrictStr | None = None
     address: IPv4Address | None = None
+
+    @field_validator("address", mode="before")
+    @classmethod
+    def address_type(cls, value: object) -> object:
+        if value is not None and not isinstance(value, (str, IPv4Address)):
+            raise ValueError("Expected an IPv4 address string")
+        return value
 
     @field_validator("public_key")
     @classmethod

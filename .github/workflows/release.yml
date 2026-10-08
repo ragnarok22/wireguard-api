@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_call:
+    inputs:
+      prerelease:
+        description: Whether to mark this release as a prerelease
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -12,9 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout repository and all known tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate release identity and semantic prerelease status
+        id: metadata
+        run: python3 -m scripts.release_metadata >> "$GITHUB_OUTPUT"
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ inputs.prerelease || steps.metadata.outputs.prerelease == 'true' }}
+          make_latest: ${{ !inputs.prerelease && steps.metadata.outputs.latest_enabled == 'true' && 'true' || 'false' }}

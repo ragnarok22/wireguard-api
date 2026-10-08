@@ -77,7 +77,7 @@ class Settings(BaseModel):
             or not port.isascii()
             or not port.isdecimal()
             or not 1 <= int(port) <= 65535
-            or host == "vpn.example.com"
+            or host.lower() == "vpn.example.com"
         ):
             raise ValueError(
                 "SERVER_ENDPOINT must be a real IPv4 host or hostname:port"

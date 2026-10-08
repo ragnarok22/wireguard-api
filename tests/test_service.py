@@ -4,9 +4,11 @@ import base64
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from ipaddress import IPv4Address, IPv4Interface
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 import service as service_module
 from errors import (
@@ -82,7 +84,7 @@ class FakeWireGuard(WireGuard):
 @pytest.fixture
 def node(tmp_path: Path) -> PeerService:
     settings = Settings(
-        api_token="test-secret",
+        api_token=SecretStr("test-secret"),
         server_endpoint="node.example.org:51820",
         data_dir=tmp_path,
     )
@@ -125,6 +127,7 @@ def test_reservation_precedes_kernel_and_credentials_are_creation_only(
     assert result.operation.status == "complete"
     assert result.peer.state == "active" and result.peer.applied
     assert result.private_key == key(1001)
+    assert result.private_key is not None
     assert result.client_config is not None
     assert f"PrivateKey = {result.private_key}" in result.client_config
     assert "::/0" not in result.client_config
@@ -166,7 +169,8 @@ def test_failed_apply_retains_pending_and_credentials_then_recovers(
     assert result.peer.state == "pending" and not result.peer.applied
     assert result.private_key == key(1001)
     assert result.client_config is not None
-    assert node.store.get_peer(result.peer.id).state == "pending"
+    record = node.store.get_peer(result.peer.id)
+    assert record is not None and record.state == "pending"
     assert node.operation(result.operation.id).error == "wireguard_unavailable"
     assert "secret-key" not in result.model_dump_json()
     assert not node.is_ready()
@@ -208,13 +212,15 @@ def test_delete_pending_survives_restart_and_never_resurrects(
 
     def verify_intent(public_key: str) -> None:
         assert public_key == result.peer.public_key
-        assert node.store.get_peer(result.peer.id).state == "deleting"
+        record = node.store.get_peer(result.peer.id)
+        assert record is not None and record.state == "deleting"
 
     kernel.before_remove = verify_intent
     setattr(kernel, failure, True)
     operation = node.delete(result.peer.id)
     assert operation.status == "pending"
-    assert node.store.get_peer(result.peer.id).state == "deleting"
+    record = node.store.get_peer(result.peer.id)
+    assert record is not None and record.state == "deleting"
     assert node.delete(result.peer.id).id == operation.id
     with pytest.raises(ConflictError, match="revoked"):
         create(node)
@@ -279,19 +285,34 @@ def test_failed_observation_blocks_creation_and_readiness(node: PeerService) -> 
     assert node.is_ready()
 
 
-def test_pending_delete_does_not_release_address(
-    node: PeerService, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pending_delete_does_not_release_address(node: PeerService) -> None:
     first = create(node)
-    backend(node).fail_remove = True
+    kernel = backend(node)
+    kernel.fail_remove = True
     assert node.delete(first.peer.id).status == "pending"
-    # Keep the pending delete durable while allowing an otherwise healthy inventory.
-    monkeypatch.setattr(node, "reconcile", lambda: None)
     with pytest.raises(ConflictError, match="reserved"):
+        node._address(IPv4Address(first.peer.address))
+    assert node._address(None) != first.peer.address
+    with pytest.raises(WireGuardError):
         create(node, "requested", address=first.peer.address)
-    second = create(node, "automatic")
-    assert second.peer.address != first.peer.address
-    assert node.server().reserved == 2
+    with pytest.raises(WireGuardError):
+        create(node, "automatic")
+    assert kernel.generated == 1
+    assert node.server().reserved == 1
+    kernel.fail_remove = False
+    node.reconcile()
+    assert create(node, "after-revocation").peer.address == first.peer.address
+
+
+def test_duplicate_requested_address_is_409_without_new_keys(node: PeerService) -> None:
+    first = create(node)
+    kernel = backend(node)
+    events = list(kernel.events)
+    with pytest.raises(ConflictError, match="reserved") as exc:
+        create(node, "duplicate-address", address=first.peer.address)
+    assert exc.value.status_code == 409
+    assert kernel.generated == 1 and kernel.events == events
+    assert len(node.store.list_peers()) == 1
 
 
 def test_idempotency_replay_mismatch_and_revocation(node: PeerService) -> None:
@@ -338,9 +359,9 @@ def test_forbidden_addresses_are_422_without_keys_or_kernel_changes(
 
 def test_pool_exhaustion_is_409(tmp_path: Path) -> None:
     settings = Settings(
-        api_token="test-secret",
+        api_token=SecretStr("test-secret"),
         server_endpoint="node.example.org",
-        server_address="10.0.0.1/30",
+        server_address=IPv4Interface("10.0.0.1/30"),
     )
     node = PeerService(
         settings,
@@ -421,7 +442,8 @@ def test_storage_commit_failure_is_pending_and_retry_recovers(
     else:
         operation = node.delete(initial.peer.id)
         peer_id = initial.peer.id
-        assert node.store.get_peer(peer_id).state == "deleting"
+        record = node.store.get_peer(peer_id)
+        assert record is not None and record.state == "deleting"
     assert operation.status == "pending" and operation.error == "storage_unavailable"
     assert node.operation(operation.id).status == "pending"
     assert "commit-secret" not in str(node.operation(operation.id))

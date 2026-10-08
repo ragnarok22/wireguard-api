@@ -97,6 +97,12 @@ def test_reject_endpoint_injection_and_invalid_hosts(endpoint: str) -> None:
         configured(server_endpoint=endpoint)
 
 
+@pytest.mark.parametrize("endpoint", ["VPN.EXAMPLE.COM", "Vpn.Example.Com:51820"])
+def test_placeholder_endpoint_cannot_bypass_validation_with_case(endpoint: str) -> None:
+    with pytest.raises(ValidationError, match="real IPv4 host"):
+        configured(server_endpoint=endpoint)
+
+
 @pytest.mark.parametrize("name", ["wg0", "eth0.1", "enp0s3-1", "a" * 15, "_wg"])
 def test_valid_interface_names(name: str) -> None:
     assert interface_name(name) == name

@@ -58,6 +58,8 @@ def smoke_test(image: str) -> None:
             args.extend(
                 [
                     "--header",
+                    f"Idempotency-Key: {uuid.uuid4().hex}",
+                    "--header",
                     "Content-Type: application/json",
                     "--data",
                     json.dumps(body),
@@ -122,7 +124,7 @@ def smoke_test(image: str) -> None:
             "--env",
             f"API_TOKEN={token}",
             "--env",
-            "SERVER_ENDPOINT=vpn.example.com:51820",
+            "SERVER_ENDPOINT=node.example.org:51820",
             "--env",
             "WG_INTERFACE=wgtest",
             "--env",
