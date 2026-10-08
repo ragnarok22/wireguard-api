@@ -7,8 +7,8 @@ from ipaddress import IPv4Interface
 from types import SimpleNamespace
 
 import pytest
-
 from bootstrap import bootstrap
+
 from errors import ControlPlaneError
 
 PRIVATE = base64.b64encode(bytes(range(32))).decode()
@@ -63,8 +63,13 @@ class Host:
             output = self.public_key + "\n"
         elif command[:2] == ["wg", "set"]:
             assert command == [
-                "wg", "set", "wgtest", "listen-port", "51900",
-                "private-key", "/dev/stdin",
+                "wg",
+                "set",
+                "wgtest",
+                "listen-port",
+                "51900",
+                "private-key",
+                "/dev/stdin",
             ]
             assert kwargs["input"] == PRIVATE + "\n"
             self.public_key = PUBLIC
@@ -89,8 +94,11 @@ class Host:
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     settings = SimpleNamespace(
-        interface="wgtest", server_address=IPv4Interface("10.77.0.1/24"),
-        listen_port=51900, data_dir=tmp_path, egress_interface=None,
+        interface="wgtest",
+        server_address=IPv4Interface("10.77.0.1/24"),
+        listen_port=51900,
+        data_dir=tmp_path,
+        egress_interface=None,
         command_timeout=0.25,
     )
     host = Host()
@@ -107,8 +115,7 @@ def test_bootstrap_repairs_without_duplicates_and_preserves_key(setup):
     assert host.public_key == PUBLIC
     assert len(host.rules) == 3
     assert any(
-        "-s 10.77.0.0/24 -o ens5 -j MASQUERADE" in " ".join(rule)
-        for rule in host.rules
+        "-s 10.77.0.0/24 -o ens5 -j MASQUERADE" in " ".join(rule) for rule in host.rules
     )
     assert any(
         "-i wgtest -o ens5 -s 10.77.0.0/24 -j ACCEPT" in " ".join(rule)
@@ -141,13 +148,18 @@ def test_existing_key_permission_repair_and_explicit_egress(setup):
     assert all("wan0" in rule for rule in host.rules)
 
 
-@pytest.mark.parametrize("addresses", [
-    [{"family": "inet", "local": "10.77.0.9", "prefixlen": 24}],
-    [{"family": "inet", "local": "10.77.0.1", "prefixlen": 32}],
-    [{"family": "inet", "local": "10.77.0.1", "prefixlen": 24},
-     {"family": "inet", "local": "192.168.3.1", "prefixlen": 24}],
-    [{"family": "inet6", "local": "fe80::1", "prefixlen": 64}],
-])
+@pytest.mark.parametrize(
+    "addresses",
+    [
+        [{"family": "inet", "local": "10.77.0.9", "prefixlen": 24}],
+        [{"family": "inet", "local": "10.77.0.1", "prefixlen": 32}],
+        [
+            {"family": "inet", "local": "10.77.0.1", "prefixlen": 24},
+            {"family": "inet", "local": "192.168.3.1", "prefixlen": 24},
+        ],
+        [{"family": "inet6", "local": "fe80::1", "prefixlen": 64}],
+    ],
+)
 def test_rejects_all_conflicting_interface_addresses(setup, addresses):
     settings, host = setup
     host.exists = True
@@ -166,10 +178,13 @@ def test_never_rekeys_or_takes_over_foreign_interface(setup, kind, key):
     assert not any(command[:2] == ["wg", "set"] for command, _ in host.calls)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("interface", "wgother"),
-    ("server_address", IPv4Interface("10.78.0.1/24")),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("interface", "wgother"),
+        ("server_address", IPv4Interface("10.78.0.1/24")),
+    ],
+)
 def test_persistent_identity_cannot_accidentally_migrate(setup, field, value):
     settings, host = setup
     bootstrap(settings)
@@ -180,8 +195,16 @@ def test_persistent_identity_cannot_accidentally_migrate(setup, field, value):
     assert not host.calls
 
 
-@pytest.mark.parametrize("route", [[], [{}], [{"dev": "wgtest"}],
-                                    [{"dev": "bad name"}], [{"dev": "a"}, {"dev": "b"}]])
+@pytest.mark.parametrize(
+    "route",
+    [
+        [],
+        [{}],
+        [{"dev": "wgtest"}],
+        [{"dev": "bad name"}],
+        [{"dev": "a"}, {"dev": "b"}],
+    ],
+)
 def test_route_must_identify_one_real_egress_without_guessing(setup, route):
     settings, host = setup
     host.route = route
@@ -190,13 +213,20 @@ def test_route_must_identify_one_real_egress_without_guessing(setup, route):
     assert not host.rules
 
 
-@pytest.mark.parametrize("prefix", [
-    ["ip", "link", "add"], ["ip", "address", "add"], ["wg", "set"],
-    ["ip", "link", "set"], ["sysctl", "-w"], ["iptables", "-w"],
-])
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ["ip", "link", "add"],
+        ["ip", "address", "add"],
+        ["wg", "set"],
+        ["ip", "link", "set"],
+        ["sysctl", "-w"],
+        ["iptables", "-w"],
+    ],
+)
 def test_stage_failure_is_safe_and_recoverable(setup, prefix):
     settings, host = setup
-    host.fail = lambda command: command[:len(prefix)] == prefix
+    host.fail = lambda command: command[: len(prefix)] == prefix
     with pytest.raises(ControlPlaneError) as error:
         bootstrap(settings)
     assert PRIVATE not in str(error.value)

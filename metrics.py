@@ -3,7 +3,13 @@
 from threading import Lock
 from time import perf_counter
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from wireguard import Snapshot

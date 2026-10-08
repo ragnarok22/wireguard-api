@@ -8,13 +8,12 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
+from fastapi import FastAPI
 from prometheus_client import REGISTRY
 from prometheus_client.parser import text_string_to_metric_families
-from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.routing import Route
-from starlette.types import ASGIApp, Message, Scope
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from metrics import Metrics, MetricsMiddleware
 from wireguard import PeerStats, Snapshot
@@ -82,9 +81,9 @@ async def peer_response(request: Request) -> Response:
 
 
 def make_app(metrics: Metrics) -> MetricsMiddleware:
-    return MetricsMiddleware(
-        Starlette(routes=[Route("/peers/{public_key}", peer_response)]), metrics
-    )
+    app = FastAPI()
+    app.add_api_route("/peers/{public_key}", peer_response, methods=["GET"])
+    return MetricsMiddleware(app, metrics)
 
 
 def test_render_exports_typed_snapshot_and_pending_without_sensitive_fields() -> None:
@@ -98,7 +97,12 @@ def test_render_exports_typed_snapshot_and_pending_without_sensitive_fields() ->
     assert samples(payload, _HANDSHAKE) == [
         ({"public_key": "peer-one="}, 1_700_000_000)
     ]
-    for forbidden in (b"secret-endpoint", b"server-public-key", b"10.0.0.2", b"keepalive"):
+    for forbidden in (
+        b"secret-endpoint",
+        b"server-public-key",
+        b"10.0.0.2",
+        b"keepalive",
+    ):
         assert forbidden not in payload
 
 
@@ -158,7 +162,9 @@ def test_unknown_routes_and_methods_have_bounded_labels() -> None:
     metrics = Metrics()
     app = make_app(metrics)
     for index in range(30):
-        messages = asyncio.run(invoke(app, scope(f"/unknown/{index}", f"CUSTOM{index}")))
+        messages = asyncio.run(
+            invoke(app, scope(f"/unknown/{index}", f"CUSTOM{index}"))
+        )
         assert messages[0]["status"] == 404
     assert samples(metrics.render(snapshot(), 0), _COUNT) == [
         ({"method": "OTHER", "endpoint": "__unmatched__", "status_code": "404"}, 30)
@@ -171,14 +177,7 @@ def test_route_template_is_read_after_routing_and_requests_share_labels() -> Non
     for key in ("one", "two"):
         request_scope = scope(f"/peers/{key}")
         assert "route" not in request_scope
-        # Starlette alone does not populate scope['route']; FastAPI does.
-        async def routed_response(
-            inner_scope: Scope, receive: object, send: object
-        ) -> None:
-            inner_scope["route"] = Route("/peers/{public_key}", peer_response)
-            await app.app(inner_scope, receive, send)
-
-        asyncio.run(invoke(MetricsMiddleware(routed_response, metrics), request_scope))
+        asyncio.run(invoke(app, request_scope))
     payload = metrics.render(snapshot(), 0)
     assert samples(payload, _COUNT) == [
         ({"method": "GET", "endpoint": "/peers/{public_key}", "status_code": "200"}, 2)
@@ -193,7 +192,7 @@ def test_exceptions_are_counted_as_500_and_propagated(start_response: bool) -> N
     metrics = Metrics()
     error = RuntimeError("secret exception details")
 
-    async def failing_app(request_scope: Scope, receive: object, send: object) -> None:
+    async def failing_app(request_scope: Scope, receive: Receive, send: Send) -> None:
         if start_response:
             await send({"type": "http.response.start", "status": 200, "headers": []})
         raise error
@@ -218,14 +217,16 @@ def test_streaming_duration_includes_last_body_and_forwards_messages() -> None:
         {"type": "http.response.body", "body": b"last", "more_body": False},
     ]
 
-    async def streaming_app(request_scope: Scope, receive: object, send: object) -> None:
+    async def streaming_app(request_scope: Scope, receive: Receive, send: Send) -> None:
         for message in expected:
             assert samples(metrics.render(None, 0), _COUNT) == []
             await send(message)
             await asyncio.sleep(0)
 
     with patch("metrics.perf_counter", side_effect=lambda: next(clock)):
-        messages = asyncio.run(invoke(MetricsMiddleware(streaming_app, metrics), scope()))
+        messages = asyncio.run(
+            invoke(MetricsMiddleware(streaming_app, metrics), scope())
+        )
     assert messages == expected
     payload = metrics.render(None, 0)
     assert samples(payload, _DURATION + "_sum") == [
@@ -235,7 +236,9 @@ def test_streaming_duration_includes_last_body_and_forwards_messages() -> None:
 
 
 @pytest.mark.parametrize("path", ["/metrics", "/livez", "/readyz"])
-def test_operational_endpoints_are_passed_through_without_observation(path: str) -> None:
+def test_operational_endpoints_are_passed_through_without_observation(
+    path: str,
+) -> None:
     metrics = Metrics()
     messages = asyncio.run(invoke(make_app(metrics), scope(path)))
     assert messages[0]["status"] == 404
@@ -248,7 +251,7 @@ def test_non_http_scopes_are_passed_through(scope_type: str) -> None:
     request_scope: Scope = {"type": scope_type}
     observed: list[Scope] = []
 
-    async def app(inner_scope: Scope, receive: object, send: object) -> None:
+    async def app(inner_scope: Scope, receive: Receive, send: Send) -> None:
         observed.append(inner_scope)
         await send({"type": "lifespan.startup.complete"})
 
