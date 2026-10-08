@@ -1,10 +1,13 @@
 """Real container startup regressions for authentication, keys and bootstrap."""
 
 import json
+import os
+import subprocess
 import sys
 import time
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 
 from scripts.smoke_container import DockerCommandError, docker
 
@@ -217,6 +220,32 @@ class BootstrapSmoke:
 
     def run(self) -> None:
         try:
+            for token in (None, ""):
+                environment = dict(os.environ)
+                environment.pop("API_TOKEN", None)
+                if token is not None:
+                    environment["API_TOKEN"] = token
+                environment["SERVER_ENDPOINT"] = "node.smoke.test:51820"
+                result = subprocess.run(
+                    [
+                        "docker",
+                        "compose",
+                        "--env-file",
+                        "/dev/null",
+                        "config",
+                        "--quiet",
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    shell=False,
+                )
+                assert result.returncode != 0 and "API_TOKEN" in result.stderr, (
+                    "Compose must reject missing/empty authentication configuration"
+                )
             self.platform = self.command(
                 "image", "inspect", self.image, "--format", "{{.Os}}/{{.Architecture}}"
             )
