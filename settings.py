@@ -79,7 +79,9 @@ class Settings(BaseModel):
             or not 1 <= int(port) <= 65535
             or host == "vpn.example.com"
         ):
-            raise ValueError("SERVER_ENDPOINT must be a real IPv4 host or hostname:port")
+            raise ValueError(
+                "SERVER_ENDPOINT must be a real IPv4 host or hostname:port"
+            )
         # Numeric dotted hosts must be valid IPv4, rather than a mistyped address.
         if re.fullmatch(r"[0-9.]+", host):
             IPv4Address(host)
@@ -102,5 +104,9 @@ class Settings(BaseModel):
             "snapshot_ttl": "WG_SNAPSHOT_TTL",
         }
         return cls.model_validate(
-            {field: os.environ[name] for field, name in names.items() if name in os.environ}
+            {
+                field: os.environ[name]
+                for field, name in names.items()
+                if name in os.environ
+            }
         )

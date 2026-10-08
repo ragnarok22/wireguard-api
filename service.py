@@ -147,7 +147,9 @@ class PeerService:
             previous = self.store.find_request(request_key)
             if previous is not None:
                 if previous.fingerprint != fingerprint:
-                    raise ConflictError("Idempotency key was used for a different request")
+                    raise ConflictError(
+                        "Idempotency key was used for a different request"
+                    )
                 record = self.store.get_peer(previous.peer_id)
                 if record is None or record.state == "deleting":
                     raise ConflictError("The original peer has been revoked")
@@ -216,7 +218,10 @@ class PeerService:
     def template(self, peer_id: str) -> str:
         peer = self.get(peer_id)
         return client_config(
-            self.settings, peer.address, self.snapshot().public_key, "<YOUR_PRIVATE_KEY>"
+            self.settings,
+            peer.address,
+            self.snapshot().public_key,
+            "<YOUR_PRIVATE_KEY>",
         )
 
     def server(self) -> ServerView:
