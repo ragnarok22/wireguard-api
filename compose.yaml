@@ -1,37 +1,39 @@
 name: wireguard-api
 
 services:
-  # https://hub.docker.com/r/linuxserver/wireguard
-  # A VPN node with WireGuard service and an API exposed over 8008 port, based in FastAPI
   app:
     build:
       context: .
       dockerfile: Dockerfile
     image: wireguard-api:latest
-    container_name: wireguard_api
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
+    # Hosts that need explicit module loading can additionally grant SYS_MODULE
+    # and mount /lib/modules. Hosts with WireGuard support need neither.
     volumes:
-      - /lib/modules:/lib/modules
-      - ./config:/config
-    networks:
-      default:
-        aliases:
-          - wireguard_api
+      - ./config:${WG_DATA_DIR:-/config}
     ports:
-      - "${VPN_PORT:-51820}:51820/udp"
-      - "${API_PORT:-8008}:8008"
+      - "${VPN_PORT:-51820}:${WG_LISTEN_PORT:-51820}/udp"
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8008}:8008/tcp"
     sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv4.ip_forward=1
+      net.ipv4.conf.all.src_valid_mark: "1"
+      net.ipv4.ip_forward: "1"
     environment:
-      - API_TOKEN=${API_TOKEN:-default_token_change_me}
-      - SERVER_PUBLIC_KEY=${SERVER_PUBLIC_KEY:-SERVER_PUB_KEY_PLACEHOLDER}
-      - SERVER_ENDPOINT=${SERVER_ENDPOINT:-vpn.example.com:51820}
-      - WG_INTERFACE=${WG_INTERFACE:-wg0}
+      API_TOKEN: ${API_TOKEN:?API_TOKEN must be set}
+      SERVER_ENDPOINT: ${SERVER_ENDPOINT:?SERVER_ENDPOINT must be set}
+      WG_INTERFACE: ${WG_INTERFACE:-wg0}
+      WG_SERVER_ADDRESS: ${WG_SERVER_ADDRESS:-10.13.13.1/24}
+      WG_LISTEN_PORT: ${WG_LISTEN_PORT:-51820}
+      WG_DATA_DIR: ${WG_DATA_DIR:-/config}
+      CLIENT_DNS: ${CLIENT_DNS:-1.1.1.1}
+      WG_EGRESS_INTERFACE: ${WG_EGRESS_INTERFACE:-}
+      WG_COMMAND_TIMEOUT: ${WG_COMMAND_TIMEOUT:-5}
+      WG_RECONCILE_INTERVAL: ${WG_RECONCILE_INTERVAL:-5}
+      WG_SNAPSHOT_TTL: ${WG_SNAPSHOT_TTL:-1}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:8008/readyz"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
     restart: unless-stopped
-
-networks:
-  default:
-    name: wireguard_api_subnet
