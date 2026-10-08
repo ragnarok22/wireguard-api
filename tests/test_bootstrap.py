@@ -29,6 +29,7 @@ class Host:
         self.calls = []
         self.fail = None
         self.generated = PRIVATE
+        self.egress_links = [{"ifname": "ens5"}, {"ifname": "wan0"}]
 
     def run(self, command, **kwargs):
         assert isinstance(command, list)
@@ -43,9 +44,12 @@ class Host:
         output = ""
         if command == ["ip", "-j", "-details", "link", "show"]:
             output = json.dumps(
-                [{"ifname": "wgtest", "linkinfo": {"info_kind": self.kind}}]
-                if self.exists
-                else []
+                self.egress_links
+                + (
+                    [{"ifname": "wgtest", "linkinfo": {"info_kind": self.kind}}]
+                    if self.exists
+                    else []
+                )
             )
         elif command[:4] == ["ip", "link", "add", "dev"]:
             self.exists = True
@@ -237,7 +241,9 @@ def test_stage_failure_is_safe_and_recoverable(setup, prefix):
     assert host.public_key == PUBLIC and len(host.rules) == 3
 
 
-@pytest.mark.parametrize("key", ["invalid", "", PRIVATE + "\n" + OTHER])
+@pytest.mark.parametrize(
+    "key", ["invalid", "", PRIVATE + "\n" + OTHER, PRIVATE + " " * 128 + OTHER]
+)
 def test_invalid_persistent_keys_fail_closed(setup, key):
     settings, host = setup
     (settings.data_dir / "server_private.key").write_text(key)
@@ -360,3 +366,12 @@ def test_corrupt_identity_manifest_prevents_mutation(setup):
     with pytest.raises(ControlPlaneError):
         bootstrap(settings)
     assert not host.calls
+
+
+def test_missing_explicit_egress_cannot_report_success(setup):
+    settings, host = setup
+    settings.egress_interface = "absent"
+    with pytest.raises(ControlPlaneError):
+        bootstrap(settings)
+    assert not host.rules
+    assert not host.addresses

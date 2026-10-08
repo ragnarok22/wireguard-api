@@ -61,7 +61,8 @@ def _read_private(path: Path) -> str:
     # through the same descriptor used for reading, without a path-based race.
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "r", encoding="ascii") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
             raise ValueError("Invalid key file")
         os.fchmod(stream.fileno(), 0o600)
         return validate_key(stream.read(128).strip())
@@ -176,6 +177,8 @@ def bootstrap(settings: Settings) -> None:
         egress = _interface_name(routes[0].get("dev"), interface)
     else:
         egress = _interface_name(settings.egress_interface, interface)
+    if not any(link.get("ifname") == egress for link in links):
+        raise ControlPlaneError("Bootstrap egress interface does not exist")
 
     if not actual:
         commands.run(["ip", "address", "add", str(expected), "dev", interface])

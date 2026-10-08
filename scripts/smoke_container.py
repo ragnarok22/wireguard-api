@@ -150,7 +150,26 @@ def smoke_test(image: str) -> None:
         server_key = json.loads(request("/v1/server")[1])["public_key"]
         assert server_key == command("exec", name, "wg", "show", "wgtest", "public-key")
 
-        generated = create({"key_mode": "generated"})
+        # Exercise generated slash-containing public keys too, with a bounded
+        # search. Deleted candidates are fully reconciled before address reuse.
+        for _ in range(32):
+            generated = create({"key_mode": "generated"})
+            candidate = generated["peer"]
+            if "/" in candidate["public_key"]:
+                break
+            candidate_path = f"/v1/peers/{candidate['id']}"
+            assert request(candidate_path, "DELETE")[0] in (202, 204)
+            wait_for(
+                lambda: (
+                    candidate["public_key"] not in peer_keys()
+                    and request(candidate_path)[0] == 404
+                ),
+                "generated candidate deletion",
+            )
+        else:
+            raise RuntimeError(
+                "No generated slash-containing public key in 32 attempts"
+            )
         peer = generated["peer"]
         public_key, private_key = peer["public_key"], generated["private_key"]
         for key in (public_key, private_key, server_key):
@@ -235,6 +254,9 @@ def smoke_test(image: str) -> None:
         )
         command("exec", client, "ip", "link", "set", "up", "dev", "wgc")
         command("exec", client, "ip", "route", "add", f"{target_ip}/32", "dev", "wgc")
+        command("exec", client, "ip", "route", "add", "10.77.0.1/32", "dev", "wgc")
+        # Require bootstrap's scoped FORWARD rules to permit both directions.
+        command("exec", name, "iptables", "-P", "FORWARD", "DROP")
 
         def nat_traffic() -> bool:
             source = command(
