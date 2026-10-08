@@ -808,6 +808,248 @@ excluded. Per-peer labels are public keys. Unavailable observations are not
 reported as an empty healthy inventory: availability is `0`, peer count is
 `NaN`, and stale peer series are removed. Pending count is `-1` if unavailable.
 
+## Troubleshooting
+
+Run these commands from the Compose project directory on the Linux deployment
+host. Set `API_URL` to your management URL (default `http://127.0.0.1:8008`) and
+`API_TOKEN` to the current token as in [Usage](#usage); account for a custom
+`API_PORT` or management tunnel. Container-side commands use the configured
+`WG_INTERFACE` and `WG_DATA_DIR` from the container environment.
+
+### Identify the failure stage
+
+```bash
+docker compose ps -a app
+docker compose logs --tail=100 app
+curl --fail-with-body "$API_URL/livez"
+curl --fail-with-body "$API_URL/readyz"
+```
+
+An expected `503` makes `curl --fail-with-body` exit nonzero but still prints the
+diagnostic JSON. No HTTP listener suggests settings, bootstrap, or storage
+initialization failure; a running container alone does not prove startup succeeded.
+`/livez` returning `200` with `/readyz` returning `503` means the process is alive
+but not operationally ready:
+
+| Readiness `reason` / symptom | Next procedure |
+| --- | --- |
+| `wireguard_unavailable` | [WireGuard unavailable or clients cannot connect](#wireguard-unavailable-or-clients-cannot-connect) |
+| No listener; bootstrap error in logs | [Bootstrap does not finish](#bootstrap-does-not-finish) |
+| `state_not_converged`; operations remain pending | [Reconciliation or peer restoration is pending](#reconciliation-or-peer-restoration-is-pending) |
+| `storage_unavailable`; storage initialization error | [Storage failure or corruption](#storage-failure-or-corruption) |
+| Creation returns `409` with pool exhaustion | [Client address pool is exhausted](#client-address-pool-is-exhausted) |
+
+API errors use `code`/`detail`; readiness uses `status`/`reason`. A `409` can also
+mean a duplicate public key, reserved requested address, or idempotency conflict;
+use its detail and request context to distinguish it from exhaustion. A public
+probe succeeding does not verify your token; follow
+[token rotation](#rotating-the-api-token) for authentication failures.
+
+### WireGuard unavailable or clients cannot connect
+
+1. Check that the deployment grants `NET_ADMIN`, the Linux host supports
+   WireGuard, and the configured interface exists in the **container** namespace:
+
+   ```bash
+   docker compose exec -T app sh -eu -c '
+     ip -details link show dev "$WG_INTERFACE"
+     ip -4 address show dev "$WG_INTERFACE"
+     wg show "$WG_INTERFACE" public-key
+     wg show "$WG_INTERFACE" listen-port
+     wg show "$WG_INTERFACE" allowed-ips
+     wg show "$WG_INTERFACE" latest-handshakes
+     wg show "$WG_INTERFACE" transfer
+   '
+   ```
+
+   These selectors expose public identity/counters, not private keys. Do not
+   collect `wg show ... dump`, `wg showconf`, `.env`, private key files, or
+   credential-bearing creation responses in support logs.
+2. If the interface is missing or commands fail, correct host kernel support,
+   capabilities, or the container configuration, then recreate with
+   `docker compose up -d --no-build --force-recreate app` using the same data mount
+   and intended image. Bootstrap recreates networking and reconciliation restores
+   peers. Raising `WG_COMMAND_TIMEOUT` is only appropriate after confirming a
+   slow command; it does not fix permissions or missing kernel support.
+3. If readiness is `200` but there is no fresh handshake, verify the client has
+   the matching server public key and usable credentials, the peer operation is
+   `complete`, the tunnel is active and sending traffic, and the endpoint resolves
+   to the reachable server. Match `SERVER_ENDPOINT`'s UDP port to `VPN_PORT`,
+   and the mapped container port to `WG_LISTEN_PORT`. Check host/cloud firewalls
+   and upstream port forwarding. Readiness checks inventory, not UDP reachability
+   or client connectivity.
+4. If handshakes work but traffic fails, inspect container forwarding and NAT:
+
+   ```bash
+   docker compose exec -T app sh -eu -c '
+     ip -4 route get 1.1.1.1
+     sysctl -n net.ipv4.ip_forward
+     iptables -t nat -S POSTROUTING
+     iptables -S FORWARD
+   '
+   ```
+
+   Forwarding must be `1`; masquerade and forwarding rules must match the pool
+   and actual egress interface. Check for earlier firewall rules blocking traffic,
+   overlapping networks, and an incorrect `WG_EGRESS_INTERFACE`. Bootstrap repairs
+   missing owned rules on restart/recreation; it does not continuously reconcile
+   firewall rules. Verify the client's IPv4 full-tunnel route (`0.0.0.0/0`), then
+   test an IPv4 destination and the configured `CLIENT_DNS` from the connected
+   client to distinguish routing from DNS failure.
+
+Recovery is complete when readiness is `200`, server identity and client `/32`
+allocations match the saved inventory, and an existing client obtains a fresh
+handshake plus working DNS and tunneled HTTP traffic.
+
+### Bootstrap does not finish
+
+1. Read the service logs. Missing/empty/default `API_TOKEN` or an invalid endpoint
+   must be corrected in the effective deployment environment before recreating
+   the container. Use the [configuration requirements](#configuration), rather
+   than bypassing validation. s6 may retry the service inside a running container.
+2. For `Invalid or inaccessible bootstrap identity`, check the mount and file
+   metadata using [storage diagnostics](#storage-failure-or-corruption). Confirm
+   the original `server_private.key` is a valid regular file and that
+   `bootstrap.json` matches the intended `WG_INTERFACE`/`WG_SERVER_ADDRESS`.
+   Restore accidentally changed settings; recover damaged identity files from
+   a complete checkpoint. Do not delete them to generate a replacement identity.
+3. Interface type/address/key mismatch means bootstrap found a conflicting node.
+   Confirm which process owns it, remove competing wg-quick/manager ownership,
+   and restore the correct deployment settings. An intentional pool/interface
+   change needs [explicit migration](#supported-paths-and-storage-compatibility).
+4. For an essential command failure, use the WireGuard and forwarding diagnostics
+   above. Ensure the egress interface exists in the container, route discovery
+   has an unambiguous exit, and `ip`, `wg`, `sysctl`, and `iptables` can perform
+   the required operations. Correct the cause and recreate the same deployment.
+   Partial bootstrap is retryable: existing keys are preserved and missing
+   interface/address/firewall setup is repaired without duplicate owned rules.
+
+Check `/readyz`, compare the server public key with the pre-failure value, and
+test an existing client's tunnel. If bootstrap succeeds but peers are pending,
+continue with reconciliation below; bootstrap itself does not restore inventory.
+
+### Reconciliation or peer restoration is pending
+
+1. Inspect the operation returned by the mutation and the desired peer state:
+
+   ```bash
+   curl --fail-with-body "$API_URL/v1/operations/$OPERATION_ID" \
+     -H "X-API-Token: $API_TOKEN"
+   curl --fail-with-body "$API_URL/v1/peers?limit=100" \
+     -H "X-API-Token: $API_TOKEN"
+   curl --fail-with-body "$API_URL/metrics"
+   ```
+
+   Follow `next_cursor` using `after` for larger inventories. Check the operation's
+   safe `error`, peer `state`/`applied`, `wireguard_available`, and
+   `wireguard_pending_operations`. There is no bulk operation-list endpoint;
+   retain operation IDs returned by mutations. A `202` already records intent.
+2. Fix WireGuard/storage failures using the corresponding procedure. Allow the
+   background loop to retry every `WG_RECONCILE_INTERVAL` seconds (default `5`),
+   with additional time for bounded commands and a larger inventory. Generic
+   reconciliation-retry logs do not mean intent was discarded. After a crash or
+   recreation, start with the same complete data mount; SQLite recovers committed
+   intent and reconciliation retries pending work.
+3. Stop competing owners if peers keep changing. SQLite owns the whole interface;
+   unmanaged peers are removed and managed `/32` assignments repaired. Editing
+   `peers.json`, `/config/wg_confs`, or manually running `wg set` does not change
+   desired state. There is no manual reconciliation HTTP endpoint.
+4. Poll until the operation is `complete` and readiness is `200`. For deletion,
+   verify the peer is absent and its connected client loses access. A superseded
+   create can finish as `cancelled`; inspect the deletion operation to establish
+   revocation. Addresses remain reserved during pending deletion.
+
+For uncertain creation results, use the same idempotency key/body to recover
+identity. Replays do not return credentials. Follow
+[lost-response recovery](#retry-semantics-and-lost-responses) before creating a
+replacement; repeatedly using new request keys can consume the pool.
+
+### Storage failure or corruption
+
+1. Inspect free space/inodes and mount/file metadata, without displaying contents:
+
+   ```bash
+   docker compose exec -T app sh -eu -c '
+     df -h "$WG_DATA_DIR"
+     df -i "$WG_DATA_DIR"
+     stat -c "%a %u:%g %n" "$WG_DATA_DIR"
+     for file in peers.sqlite3 peers.sqlite3.lock bootstrap.json server_private.key; do
+       if [ -e "$WG_DATA_DIR/$file" ]; then
+         stat -c "%a %u:%g %n" "$WG_DATA_DIR/$file"
+       fi
+     done
+   '
+   CONTAINER="$(docker compose ps -a -q app)"
+   docker inspect --format '{{json .Mounts}}' "$CONTAINER"
+   ```
+
+   If the container has exited, inspect the corresponding host mount instead.
+   Confirm the intended data directory is mounted read-write, has room for SQLite
+   transactions/journals, and permits the service to create files, lock, and apply
+   `0600` permissions. Correct ownership/access for the actual service user;
+   widening secret files to world-readable is not a recovery step.
+2. For lock timeouts, find and stop the competing process/container using the
+   directory. A crash releases the OS lock; the remaining `.lock` file is normal.
+   Do not unlink it to bypass contention, since owners must lock the same inode.
+3. Schema/network-identity errors require the image and settings compatible with
+   that data. Restore accidentally changed interface/address settings. Do not
+   edit `metadata.version` to force acceptance; it is not a compatibility switch.
+   Invalid initial legacy input requires deliberate correction from the original
+   backup; import is all-or-nothing and preserves its source.
+4. For corruption or unrecoverable identity damage, stop the service and retain
+   the failed directory, then [restore a verified checkpoint](#restore-and-verify-a-checkpoint)
+   into an empty mount with its matching image/settings. Follow the full
+   [offline backup procedure](#consistent-offline-backups) for recovery copies.
+   Never replace an unreadable inventory with an empty database, discard journals,
+   or delete the server key. If a candidate upgrade failed, use the
+   [rollback procedure](#rollback-procedure); v0.4.2 needs its complete pre-upgrade
+   checkpoint, not the migrated directory or its stale legacy JSON.
+
+After recovery, verify readiness, server identity, exact peer addresses, completed
+deletions and an existing client's handshake/DNS/tunneled traffic. Restore returns
+to the checkpoint's recovery point: apply post-checkpoint revocations before
+reopening access, and retain credential-free idempotency/operation history.
+These restore/rollback and read-only/corrupt/incompatible-schema recovery paths
+are exercised by the [lifecycle container checks](#container-checks).
+
+### Client address pool is exhausted
+
+Automatic allocation returns `409` with `code: "conflict"` and detail
+`"The client address pool is exhausted"` when no usable address remains. Readiness
+can still be `200`; a full pool is not a backend failure.
+
+```bash
+curl --fail-with-body "$API_URL/v1/server" -H "X-API-Token: $API_TOKEN"
+curl --fail-with-body "$API_URL/v1/peers?limit=100" \
+  -H "X-API-Token: $API_TOKEN"
+```
+
+Capacity is the subnet's address count minus network, broadcast, and server
+addresses: `/24` allows `253` clients; `/30` allows `1`. `reserved` includes
+pending, active, and deleting peers; `available` must increase only after verified
+revocation. Paginate through all peers and identify unwanted allocations,
+including creations whose generated response was lost.
+
+Revoke a selected unwanted peer through the API using its UUID:
+
+```bash
+curl --fail-with-body -i -X DELETE "$API_URL/v1/peers/$PEER_ID" \
+  -H "X-API-Token: $API_TOKEN"
+```
+
+A `204` verifies deletion. For `202`, use the returned **deletion** operation ID
+and [poll it](#revoke-a-peer-and-poll-an-operation); fix any pending backend failure
+before expecting the address to be released. Confirm `available` has increased
+before retrying creation with its original key/body. Existing deleted peers'
+request keys stay revoked and cannot be recycled for a new peer.
+
+A requested address already reserved also returns `409`; select a usable free
+address or omit `address` for automatic allocation. Changing the pool prefix on
+an existing volume is not an exhaustion workaround: interface and database
+identity guards require coordinated migration. For additional capacity, provision
+a separate exclusive node with its own persistent directory and non-overlapping
+pool, or plan an explicit allocation/client-configuration migration.
+
 ## Development
 
 This project uses [uv](https://github.com/astral-sh/uv) for dependency management
@@ -836,8 +1078,8 @@ to manage it. Its inventory is exclusively managed by the database.
 The coverage floor is **100% of statements and branches** across the application
 modules listed in `pyproject.toml`: composition/routes, service, storage/locking/
 migration, adapter/bootstrap, settings/models/errors/keys/configuration/version,
-health, and metrics. Release-metadata behavior is also exercised by unit tests;
-keep quality configuration aligned when adding helpers. Unit tests use fake
+health/metrics, stats/cgroups/system_info/telemetry, and release metadata. Keep
+typing and coverage module lists aligned when adding helpers. Unit tests use fake
 WireGuard backends and temporary storage, without privileged networking.
 
 ### Module responsibilities
