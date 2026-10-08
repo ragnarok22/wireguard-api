@@ -60,7 +60,7 @@ jobs:
       - name: Check service shell and Compose configuration
         env:
           API_TOKEN: ci-compose-validation-token
-          SERVER_ENDPOINT: vpn.example.com:51820
+          SERVER_ENDPOINT: node.example.org:51820
         run: |
           sh -n service_run
           docker compose --env-file /dev/null config --quiet

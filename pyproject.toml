@@ -51,6 +51,7 @@ files = [
     "api.py", "routes.py", "health.py", "metrics.py", "wireguard.py", "storage.py",
     "storage_lock.py", "legacy.py", "settings.py", "models.py", "service.py",
     "errors.py", "keys.py", "configuration.py", "version.py", "bootstrap.py",
+    "scripts/release_metadata.py",
 ]
 strict = true
 
@@ -59,7 +60,7 @@ branch = true
 source = [
     "api", "routes", "health", "metrics", "wireguard", "storage", "storage_lock",
     "legacy", "settings", "models", "service", "errors", "keys", "configuration",
-    "version", "bootstrap",
+    "version", "bootstrap", "scripts.release_metadata",
 ]
 
 [tool.coverage.report]

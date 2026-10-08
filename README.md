@@ -75,11 +75,11 @@ VPN_PORT=51820
 ```
 
 **Replace `vpn.your-domain.tld` with your actual reachable hostname or IPv4
-address.** `node.example.org` in validation examples below is also a placeholder
-to replace for deployment. `API_TOKEN` and `SERVER_ENDPOINT` are required;
-there is no fallback token or endpoint. The old token `default_token_change_me`
-and the hostname `vpn.example.com` are intentionally rejected. Keep `.env`
-private and outside Git.
+address.** `node.example.org`, used by deployment validation, is also a
+placeholder to replace for deployment. `API_TOKEN` and `SERVER_ENDPOINT` are
+required, with no fallback token or endpoint. The old token
+`default_token_change_me` and the hostname `vpn.example.com` are intentionally
+rejected. Keep `.env` private and outside Git.
 
 ```bash
 docker compose up -d --build
@@ -121,11 +121,15 @@ and `VPN_PORT` are Compose-only settings. Match the exposed UDP port in
 
 ### AWS EC2 networking
 
-Disable **Source/destination check** on the VPN instance under **EC2 → Instances
-→ Actions → Networking → Change source/destination check** so it can forward
-client traffic. Allow inbound UDP on the VPN port from VPN clients in the
-security group. Keep management access restricted; the default loopback API
-binding is not directly reachable through an EC2 security group rule.
+Allow inbound UDP on the VPN port from VPN clients in the security group. Keep
+management access restricted; the default loopback API binding is not directly
+reachable through an EC2 security group rule.
+
+If the instance also routes traffic for other networks without translating it
+to its own address, disable **Source/destination check** under **EC2 → Instances
+→ Actions → Networking → Change source/destination check**. That requirement
+depends on the ENI routing topology; the default deployment here masquerades
+VPN client traffic to the server's address.
 
 ## Configuration
 
@@ -173,7 +177,7 @@ stopped so the database and server identity stay consistent.
 ## Upgrading an existing deployment
 
 This refactor is breaking: old unversioned `/peers`, public-key URLs,
-`?format=config`, `/config` peer responses, and `/health` are replaced by the
+`?format=config`, `/peers/{public_key}/config`, and `/health` are replaced by the
 contracts below. Update management clients before switching deployments.
 
 Although the image inherits `linuxserver/wireguard`, its native wg-quick
@@ -276,6 +280,31 @@ and nullable `observation`. Operation records include UUID `id` and `peer_id`,
 `kind`, `status`, public key/address, nullable safe `error`, `created_at`, and
 request key/fingerprint. Timestamps are Unix seconds.
 
+Example `201` response excerpt (keys/configuration abbreviated; timestamps,
+observations, and operation request metadata omitted):
+
+```json
+{
+  "peer": {
+    "id": "79a94a53-c94a-46c7-ab91-bc52196c1355",
+    "public_key": "<client-public-key>",
+    "address": "10.13.13.2",
+    "state": "active",
+    "applied": true
+  },
+  "operation": {
+    "id": "e5df978a-5c11-4d17-b425-4aeb2c349cb8",
+    "peer_id": "79a94a53-c94a-46c7-ab91-bc52196c1355",
+    "kind": "create",
+    "status": "complete",
+    "error": null
+  },
+  "private_key": "<client-private-key>",
+  "client_config": "<complete WireGuard client configuration>",
+  "replayed": false
+}
+```
+
 - **`201`**: creation is verified in WireGuard; the peer is active.
 - **`202`**: intent is durable but application is pending. Save the initial
   credentials now, then poll the returned operation ID. `Retry-After: 5`
@@ -331,6 +360,17 @@ complete or `202` if still pending, with the original peer/operation and
 with a different request returns `409`. Replaying after the original peer has
 been revoked or entered deletion also returns `409`.
 
+```bash
+curl --fail-with-body -X POST "$API_URL/v1/peers" \
+  -H "X-API-Token: $API_TOKEN" \
+  -H "Idempotency-Key: $REQUEST_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"key_mode":"generated"}'
+```
+
+This retries the generated example above; keep any original credential-bearing
+files instead of replacing them with the replay response.
+
 There is **no private-key recovery endpoint**. If a generated initial response
 is lost, its idempotency key lets you recover the peer and operation identity,
 but not its credentials. Revoke that peer, wait for completed revocation, then
@@ -353,6 +393,14 @@ on the last page. Pass it as `after` on the next request. `limit` defaults to
 `50` and accepts `1`–`100`. Peer states are `pending`, `active`, and `deleting`.
 `applied` reports whether an active peer's kernel address matches desired state;
 `observation` contains live endpoint, traffic, handshake, and keepalive data.
+
+For a non-null cursor returned by the previous page:
+
+```bash
+export CURSOR="replace-with-the-returned-next_cursor-UUID"
+curl --fail-with-body "$API_URL/v1/peers?limit=50&after=$CURSOR" \
+  -H "X-API-Token: $API_TOKEN"
+```
 
 ```bash
 umask 077
@@ -386,9 +434,9 @@ curl --fail-with-body "$API_URL/v1/operations/$OPERATION_ID" \
 ```
 
 Operations report `pending` while reconciliation retries and `complete` when
-the kernel mutation is verified. A pending create superseded by deletion is
-cancelled rather than a successful creation; clients should handle `cancelled`
-as a terminal status. Operation history remains available after peer deletion.
+the kernel mutation is verified. `cancelled` is terminal for a pending create
+superseded by deletion; it does not mean successful creation. Operation history
+remains available after peer deletion.
 Inspecting or deleting a missing peer returns `404`.
 
 ### Errors
