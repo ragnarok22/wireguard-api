@@ -147,6 +147,7 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           docker pull --platform "$PLATFORM" "$IMAGE"
+          make bootstrap-check IMAGE="$IMAGE"
           python3 scripts/smoke_container.py "$IMAGE"
           printf '* Published image smoke test passed: %s on %s\n' \
             "$IMAGE" "$PLATFORM" >> "$GITHUB_STEP_SUMMARY"

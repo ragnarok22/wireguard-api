@@ -2,7 +2,7 @@ UV ?= uv
 IMAGE ?= wireguard-api:smoke
 PREVIOUS_IMAGE ?= wireguard-api:baseline-0.4.2
 
-.PHONY: install format format-check lint typecheck run test coverage check deployment-check lifecycle-check
+.PHONY: install format format-check lint typecheck run test coverage check deployment-check bootstrap-check lifecycle-check
 
 install:
 	$(UV) sync --locked
@@ -35,6 +35,9 @@ deployment-check:
 	sh -n service_run
 	API_TOKEN=deployment-check-token SERVER_ENDPOINT=node.example.org:51820 docker compose --env-file /dev/null config --quiet
 	docker build --check .
+
+bootstrap-check:
+	python3 -m scripts.smoke_bootstrap "$(IMAGE)"
 
 lifecycle-check:
 	python3 -m scripts.smoke_lifecycle "$(IMAGE)" "$(PREVIOUS_IMAGE)"

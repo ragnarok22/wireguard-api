@@ -7,6 +7,21 @@ import sys
 import time
 import uuid
 
+SERVER_KEY_CHECK = """
+import os
+import stat
+from pathlib import Path
+
+path = Path('/config/server_private.key')
+info = path.lstat()
+assert stat.S_ISREG(info.st_mode), 'Key must be a regular file'
+assert stat.S_IMODE(info.st_mode) == 0o600, 'Key permissions must be 0600'
+assert info.st_uid == os.geteuid(), 'Key owner differs from bootstrap owner'
+assert info.st_gid == os.getegid(), 'Key group differs from bootstrap group'
+assert not list(Path('/config').glob('.bootstrap-*')), 'Leaked publication file'
+assert not Path('/tmp/server.key').exists(), 'Leaked legacy temporary key'
+"""
+
 TARGET_SCRIPT = """
 import socket
 import socketserver
@@ -154,6 +169,7 @@ def smoke_test(image: str) -> None:
         wait_for(lambda: request("/readyz", auth=None)[0] == 200, "readiness")
         assert request("/livez", auth=None)[0] == 200
         command("exec", name, "wg", "show", "wgtest")
+        command("exec", name, "python", "-c", SERVER_KEY_CHECK)
 
     def peer_keys() -> set[str]:
         return set(command("exec", name, "wg", "show", "wgtest", "peers").splitlines())
@@ -498,6 +514,8 @@ def smoke_test(image: str) -> None:
 
         assert request(external_path, "DELETE")[0] in (202, 204)
         wait_for(lambda: slash_key not in peer_keys(), "peer removal")
+        # Repair inherited permissive permissions without changing identity.
+        command("exec", name, "chmod", "0644", "/config/server_private.key")
         # Recreate, rather than merely restarting: namespace disappears, volume stays.
         command("rm", "--force", name)
         start_server()

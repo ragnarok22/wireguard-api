@@ -74,6 +74,8 @@ jobs:
           tags: wireguard-api:smoke
           cache-from: type=gha,scope=checks-${{ matrix.runner }}
           cache-to: type=gha,scope=checks-${{ matrix.runner }},mode=max
+      - name: Verify authentication, key permissions and bootstrap failures
+        run: make bootstrap-check
       - name: Smoke-test WireGuard API and persistence
         run: python3 scripts/smoke_container.py wireguard-api:smoke
       - name: Prepare native v0.4.2 upgrade baseline
