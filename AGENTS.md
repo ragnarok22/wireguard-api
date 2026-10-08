@@ -12,6 +12,7 @@
 - `pyproject.toml` and `uv.lock`: Python 3.14+ dependencies managed with uv; `.python-version` pins the development interpreter.
 - `Makefile`: Development, quality, coverage, and deployment-check targets. `Dockerfile` uses pinned uv/linuxserver images and Alpine's Python, disabling inherited wg-quick, module-loading, and CoreDNS owners.
 - `tests/`: Unit suites for application modules and release metadata. `scripts/smoke_container.py`: disposable server/client/NAT-target integration with a real handshake and recreation/persistence checks.
+- `scripts/smoke_lifecycle.py`: native v0.4.2 upgrade, crash/pending-operation recovery, offline full-directory backup restoration, storage rejection, and checkpoint-based rollback with real client DNS/HTTP/NAT.
 - `.github/workflows/checks.yml`: Reusable Python and native amd64/arm64 container checks; `tests.yml`: PR/main entry point; `publish-docker.yml`: metadata, publication, published-digest verification, and eligible alias promotion; `release.yml`: release after verification.
 - `renovate.json`: Weekly Python, lockfile, Actions, and Docker update configuration.
 - Keep `AGENTS.md` and `CLAUDE.md` synchronized. Preserve the user's README introduction and all contributor blocks when updating documentation.
@@ -29,6 +30,7 @@
 - For an older installed uv binary, pass `UV="uv tool run --from uv==0.12.23 uv"` to make.
 - Container flow: Set a strong `API_TOKEN` and real `SERVER_ENDPOINT`, then `docker compose up -d --build`. Example endpoint `node.example.org:51820` must be replaced with the deployment's reachable hostname/IP; `vpn.example.com` is intentionally rejected.
 - Container verification: `make deployment-check`, `docker build -t wireguard-api:smoke .`, then `python3 scripts/smoke_container.py wireguard-api:smoke`. The smoke runner needs Python 3.10+ and Docker with host WireGuard support.
+- `make lifecycle-check IMAGE=wireguard-api:smoke PREVIOUS_IMAGE=wireguard-api:baseline-0.4.2`: verify upgrades/restoration/rollback with both images present on the same architecture. amd64 CI uses the pinned published v0.4.2 digest; arm64 rebuilds its exact release source. Preserve full stopped-service checkpoints and use pre-upgrade data plus the previous image for legacy rollback, never stale migrated JSON.
 
 ## API & State Invariants
 - Management routes are `/v1` only, authenticated with `X-API-Token` (`401` missing, `403` invalid). Use UUID peer/operation IDs. List responses have `items` and `next_cursor`; pass the cursor as `after`.

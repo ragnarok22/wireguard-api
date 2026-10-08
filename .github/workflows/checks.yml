@@ -53,6 +53,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Check Dockerfile
@@ -75,3 +76,19 @@ jobs:
           cache-to: type=gha,scope=checks-${{ matrix.runner }},mode=max
       - name: Smoke-test WireGuard API and persistence
         run: python3 scripts/smoke_container.py wireguard-api:smoke
+      - name: Prepare native v0.4.2 upgrade baseline
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ "$PLATFORM" = linux/amd64 ]; then
+            BASELINE=ragnarok22/wireguard-api@sha256:58e3deafcc1592a67061a3a1aa86f7c87074a33977e8a4d7e3eddc30baeb9503
+            docker pull --platform "$PLATFORM" "$BASELINE"
+            docker tag "$BASELINE" wireguard-api:baseline-0.4.2
+          else
+            # v0.4.2 was published for amd64 only. Build its actual release source
+            # and original Dockerfile natively; never emulate the lifecycle check.
+            git archive --format=tar d4d5bd8a162b8ee57c3dc3bcaeeb57fab5147aae |
+              docker build --platform "$PLATFORM" --tag wireguard-api:baseline-0.4.2 -
+          fi
+      - name: Verify upgrade, backup restoration, crash recovery and rollback
+        run: make lifecycle-check

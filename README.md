@@ -177,6 +177,24 @@ stopped so the database and server identity stay consistent.
 
 ## Upgrading an existing deployment
 
+### Supported paths and storage compatibility
+
+The integration-tested legacy upgrade path is **v0.4.2 → this implementation**,
+using the old release's real `peers.json` and `server_private.key`. v0.4.2's
+default node is `wg0` with `10.13.13.1/24`; preserve those values when upgrading
+that deployment. Other releases/configurations need an inventory and identity
+review first; arbitrary linuxserver wg-quick configurations are not an automatic
+upgrade path.
+
+The current SQLite format has `metadata.version = 1`. Startup requires the
+recognized tables/columns, matching interface/address identity, and a successful
+integrity check. Unknown schemas and corrupt databases block startup rather than
+being reset. A matching version number alone is not a downgrade guarantee:
+only use releases whose data/API compatibility has been explicitly verified.
+The tested downgrade to v0.4.2 uses its **pre-upgrade backup**, not the new SQLite
+directory. v0.4.2 does not read SQLite, and the preserved legacy JSON is not
+updated after migration.
+
 This refactor is breaking: old unversioned `/peers`, public-key URLs,
 `?format=config`, `/peers/{public_key}/config`, and `/health` are replaced by the
 contracts below. Update management clients before switching deployments.
@@ -206,6 +224,10 @@ For a deployment using the old API's `peers.json`:
    initialization, migration imports all valid records transactionally, assigns
    UUID IDs, and records pending create operations for reconciliation.
 6. Check `/readyz`, list `/v1/peers`, and update clients to use their UUID IDs.
+   Compare server public key, peer public keys, and allocations with the old
+   deployment. Establish a fresh handshake and test both DNS and traffic from
+   an existing client. Existing credentials remain valid for the supported
+   IPv4 policy; remove obsolete `::/0` routing from old generated configurations.
 
 Migration is **all-or-nothing**. Invalid legacy data clearly blocks application
 startup; the original JSON remains untouched and no partial inventory is
@@ -217,6 +239,105 @@ Both bootstrap and storage guard the interface/address identity. An intentional
 interface or pool change needs a coordinated migration of persisted identity,
 peer allocations, and client configurations. Do not casually delete
 `bootstrap.json`, the database, or the server key to bypass a mismatch.
+
+### Consistent offline backups
+
+Stop the sole owner of the node before copying **the entire data directory**.
+This includes the server key, bootstrap binding, SQLite database and any journal
+or WAL files, legacy input, and operation/idempotency history. A live copy of
+`peers.sqlite3` alone is not the supported backup procedure. Save the deployment
+settings and exact image reference/digest alongside each checkpoint; `.env` and
+saved client credentials are separate secrets and are not inside `/config`.
+
+For the repository's Compose bind mount (`./config`), run from the project
+directory on the Linux deployment host:
+
+```bash
+umask 077
+mkdir -p backups
+chmod 700 backups
+CHECKPOINT="$(date -u +%Y%m%dT%H%M%SZ)"
+BACKUP="backups/config-$CHECKPOINT.tar"
+CONTAINER="$(docker compose ps -q app)"
+docker inspect --format '{{.Image}}' "$CONTAINER" > "$BACKUP.image-id"
+# Also record the registry reference/digest used to deploy this container.
+# Retain the old image locally, or save it if that digest cannot be pulled again.
+docker compose stop app
+for file in server_private.key bootstrap.json peers.sqlite3 peers.json; do
+  if [ -f "config/$file" ]; then sudo chmod 600 "config/$file"; fi
+done
+sudo tar --numeric-owner -cpf - -C ./config . > "$BACKUP"
+sha256sum "$BACKUP" > "$BACKUP.sha256"
+docker compose start app
+```
+
+Check each command succeeds before continuing. Keep the backup/archive,
+deployment secrets, and client credentials restricted to their owner (`0600`),
+with private backup directories (`0700`). Encrypt copies kept off-host: the
+archive contains the server's private key. For a custom mount or named volume,
+use the same stopped-service procedure, mounting the source read-only into a
+helper container and archiving it in full. Do not print keys or credential-bearing
+API responses into backup logs.
+
+### Restore and verify a checkpoint
+
+1. Stop the service and retain the failed directory as a separate recovery copy.
+2. Verify the archive checksum. Extract into an **empty** directory/volume;
+   never overlay an old archive onto a newer database or leave newer journal
+   files behind. Preserve file permissions and numeric ownership.
+3. Restore the settings and image associated with that checkpoint. Preserve
+   `WG_INTERFACE`, `WG_SERVER_ADDRESS`, the endpoint, listener and data mount.
+4. Start only one owner of this restored node. Verify readiness, unchanged server
+   public key, exact peer inventory/addresses, deletion history, and an existing
+   client's fresh handshake, DNS and tunneled traffic.
+
+For the Compose bind mount, with `BACKUP` still pointing at the selected archive:
+
+```bash
+sha256sum -c "$BACKUP.sha256"
+docker compose stop app
+sudo mv ./config "./config-before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+sudo install -d -m 700 ./config
+sudo tar --numeric-owner -xpf "$BACKUP" -C ./config
+# Start with the checkpoint's image/configuration, not an accidental local rebuild.
+docker compose up -d --no-build --force-recreate app
+```
+
+The checkpoint defines the recovery point: later creations, deletions and
+idempotency records are not in that backup. A peer deleted **before** the
+checkpoint must stay deleted. Before reopening management/UDP access, reconcile
+any revocations made **after** it; restoring an older checkpoint can otherwise
+bring those credentials back. Client private keys cannot be recovered from a
+server backup. Lost generated client credentials require revocation and a new
+creation with a new idempotency key.
+
+### Rollback procedure
+
+Before upgrading, take and verify an offline checkpoint and retain the exact
+previous image plus its settings. If the upgrade fails:
+
+1. Stop the candidate and checkpoint its failed directory separately for diagnosis.
+2. Restore the **complete pre-upgrade checkpoint into an empty mount** using the
+   procedure above. Do not point v0.4.2 at the candidate's migrated directory:
+   it would use stale `peers.json`, ignoring newer peers and revocations in SQLite.
+3. Select the previous image explicitly and restore its original deployment
+   definition/environment. For example, an image-only Compose override can set
+   `services.app.image` to the retained image ID or immutable registry digest;
+   start with `--no-build --force-recreate`, including that override file.
+   v0.4.2 uses `/health` and the unversioned API, so also restore its management
+   client contracts and healthcheck. Its inherited networking services differ
+   from the candidate; use the old deployment definition rather than assuming
+   the candidate's Compose environment is equivalent.
+4. Compare identity/inventory with the checkpoint and verify existing client
+   connectivity. Apply post-checkpoint revocations before exposing the node.
+
+This rollback intentionally returns to the pre-upgrade recovery point; automatic
+reverse migration/merging of SQLite into legacy JSON is unsupported. A subsequent
+upgrade imports that checkpoint again and assigns new UUIDs to legacy peers,
+while preserving their public keys, addresses and server identity. For storage
+failures, keep the damaged data, restore a verified checkpoint, and retry with
+the correct writable mount/schema; do not recover by deleting the key/database
+or replacing an unreadable inventory with an empty one.
 
 ## Usage
 
@@ -629,10 +750,42 @@ and cleans up its containers, both networks, and volume on success or failure.
 Application dependencies stay inside the image; no public Internet/DNS service
 is needed. This exercises the supported IPv4-only, `0.0.0.0/0` client policy.
 
+For version-to-version lifecycle checks, prepare a **different** v0.4.2 baseline
+image on the candidate's architecture, then run:
+
+```bash
+# Native source rebuild of the exact v0.4.2 commit, using its original Dockerfile.
+git archive --format=tar d4d5bd8a162b8ee57c3dc3bcaeeb57fab5147aae |
+  docker build -t wireguard-api:baseline-0.4.2 -
+make lifecycle-check
+# Override either image when testing a published candidate/different local tag:
+# make lifecycle-check IMAGE=registry/image@sha256:... PREVIOUS_IMAGE=old-image
+```
+
+On amd64, CI uses the actual published v0.4.2 image pinned to
+`ragnarok22/wireguard-api@sha256:58e3deafcc1592a67061a3a1aa86f7c87074a33977e8a4d7e3eddc30baeb9503`.
+That release has no arm64 image, so arm64 CI rebuilds its pinned release commit
+and original Dockerfile natively. The original Dockerfile's base/uv references
+are floating; that source rebuild validates the legacy application/storage
+path, not byte-for-byte identity with the published amd64 artifact.
+
+`scripts/smoke_lifecycle.py` checks working legacy-client DNS/HTTP/NAT before and
+after upgrade, server identity, migration, durable pending create/delete recovery
+after SIGKILL with an uncommitted SQLite transaction, same-image recreation,
+offline tar backup/restore into a new volume (bytes, modes and ownership),
+read-only/corrupt/incompatible-schema rejection and recovery, and rollback plus
+re-upgrade from the pre-upgrade checkpoint. Peer UUIDs/allocations, completed
+deletion operations and credential-free idempotency replays survive candidate
+restoration. Deleted peers remain absent at each checkpoint. It has a 600-second
+deadline and removes all test containers, networks, archives and volumes on
+success/failure. The legacy bootstrap may make its historical outbound Internet
+check; the actual VPN/DNS traffic checks use controlled local targets.
+
 ### CI, publishing, and dependency updates
 
 - Pull requests and pushes to `main` run Python checks and native amd64/arm64
-  builds and smoke tests. Coverage XML is uploaded as an artifact.
+  builds, smoke tests, and upgrade/backup/rollback lifecycle checks. Coverage XML
+  is uploaded as an artifact.
 - Release tags must be exact SemVer `vMAJOR.MINOR.PATCH`, optionally with
   prerelease/build metadata, and match `project.version` in `pyproject.toml`
   and `version.VERSION` exactly. `pyproject.toml` is the single version source.
@@ -643,10 +796,10 @@ is needed. This exercises the supported IPv4-only, `0.0.0.0/0` client policy.
   Newer known stable tags suppress older aliases even if not yet published;
   build metadata does not affect SemVer precedence.
 - Publication runs quality/container checks, pushes the multi-platform image
-  to Docker Hub and GHCR, and smoke-tests the exact published digest natively
-  on amd64 and arm64 before promoting eligible moving aliases and creating the
-  GitHub release. Docker Hub uses `DOCKER_USERNAME` / `DOCKER_TOKEN`; GHCR and
-  releases use `GITHUB_TOKEN`.
+  to Docker Hub and GHCR, and runs smoke and lifecycle tests against the exact
+  published digest natively on amd64 and arm64 before promoting eligible moving
+  aliases and creating the GitHub release. Docker Hub uses `DOCKER_USERNAME` /
+  `DOCKER_TOKEN`; GHCR and releases use `GITHUB_TOKEN`.
 - Actions and Docker base images are pinned. Enable the
   [Renovate GitHub app](https://github.com/apps/renovate) to activate weekly
   dependency/lockfile maintenance in `renovate.json`.

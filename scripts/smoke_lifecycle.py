@@ -325,6 +325,8 @@ class LifecycleSmoke:
         )
         replay = json.loads(content)
         assert status == 200 and replay["peer"]["id"] == self.pending_id
+        assert replay["operation"]["id"] == self.pending_operation
+        assert replay["operation"]["status"] == "complete"
         assert replay["private_key"] is None and replay["client_config"] is None
 
     def expect_blocked(self, reason: str) -> None:
@@ -487,6 +489,7 @@ class LifecycleSmoke:
         assert status == 202, "Failed kernel mutation must leave a durable creation"
         pending = json.loads(content)
         self.pending_id = pending["peer"]["id"]
+        self.pending_operation = pending["operation"]["id"]
         expected[pending["peer"]["public_key"]] = (self.pending_id, "10.13.13.8")
         status, content = self.request(f"/v1/peers/{self.deleted_id}", "DELETE")
         assert status == 202, "Failed kernel mutation must leave a durable deletion"
@@ -540,6 +543,23 @@ class LifecycleSmoke:
             "Read-only startup modified storage"
         )
 
+        self.stage = "incompatible schema rejection"
+        self.helper(
+            self.restored,
+            "python",
+            "-c",
+            "import sqlite3; "
+            "db = sqlite3.connect('/source/peers.sqlite3'); "
+            "db.execute('UPDATE metadata SET version = 2'); db.commit(); db.close()",
+        )
+        incompatible = self.snapshot(self.restored)
+        self.start(self.candidate, self.restored, ready=False)
+        self.expect_blocked("Peer storage schema or network identity mismatch")
+        self.stop()
+        assert self.snapshot(self.restored) == incompatible, (
+            "Unsupported schema must not be silently rewritten"
+        )
+
         self.stage = "corrupted database rejection and restore"
         self.helper(
             self.restored,
@@ -548,20 +568,21 @@ class LifecycleSmoke:
             "from pathlib import Path; "
             "Path('/source/peers.sqlite3').write_bytes(b'corrupt')",
         )
+        damaged = self.snapshot(self.restored)
         self.start(self.candidate, self.restored, ready=False)
         self.expect_blocked("Peer storage unavailable")
         self.stop()
-        assert (
-            self.snapshot(self.restored)["peers.sqlite3"]["sha256"]
-            != (candidate_snapshot["peers.sqlite3"]["sha256"])
-        ), "Corrupted database must not be silently reset"
+        assert self.snapshot(self.restored) == damaged, (
+            "Corrupted database must not be silently reset"
+        )
         self.restore(self.recovery, "candidate.tar", candidate_snapshot)
         self.start(self.candidate, self.recovery)
         self.verify_candidate(expected)
         self.configure_client(reconnect=True)
         self.stop()
         print(
-            "Read-only/corrupt storage rejected; backup recovery preserved live peers"
+            "Read-only/incompatible/corrupt storage rejected; "
+            "backup recovery preserved live peers"
         )
 
         self.stage = "rollback to v0.4.2 with its pre-upgrade checkpoint"
