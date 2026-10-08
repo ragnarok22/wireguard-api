@@ -2,13 +2,14 @@
 
 import base64
 import json
+import os
 import subprocess
 from ipaddress import IPv4Interface
 from types import SimpleNamespace
 
 import pytest
-from bootstrap import bootstrap
 
+from bootstrap import bootstrap
 from errors import ControlPlaneError
 
 PRIVATE = base64.b64encode(bytes(range(32))).decode()
@@ -40,7 +41,7 @@ class Host:
         if self.fail and self.fail(command):
             raise subprocess.CalledProcessError(2, command, stderr=PRIVATE)
         output = ""
-        if command == ["ip", "-j", "link", "show"]:
+        if command == ["ip", "-j", "-details", "link", "show"]:
             output = json.dumps(
                 [{"ifname": "wgtest", "linkinfo": {"info_kind": self.kind}}]
                 if self.exists
@@ -240,6 +241,122 @@ def test_stage_failure_is_safe_and_recoverable(setup, prefix):
 def test_invalid_persistent_keys_fail_closed(setup, key):
     settings, host = setup
     (settings.data_dir / "server_private.key").write_text(key)
+    with pytest.raises(ControlPlaneError):
+        bootstrap(settings)
+    assert not host.calls
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError("secret"), subprocess.TimeoutExpired("wg", 0.25, PRIVATE)]
+)
+def test_spawn_and_timeout_errors_never_expose_output(setup, monkeypatch, failure):
+    settings, _ = setup
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    with pytest.raises(ControlPlaneError) as error:
+        bootstrap(settings)
+    assert "secret" not in str(error.value) and PRIVATE not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize("response", ["not-json", "null", "{}", "[null]"])
+def test_malformed_command_json_fails_closed(setup, monkeypatch, response):
+    settings, host = setup
+
+    def run(command, **kwargs):
+        if command[:3] == ["ip", "-j", "-details"]:
+            return subprocess.CompletedProcess(command, 0, stdout=response)
+        return host.run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ControlPlaneError):
+        bootstrap(settings)
+    assert not host.rules
+
+
+@pytest.mark.parametrize("response", [[], [{}], [{"addr_info": None}]])
+def test_malformed_address_query_fails_closed(setup, monkeypatch, response):
+    settings, host = setup
+
+    def run(command, **kwargs):
+        if command[:4] == ["ip", "-j", "address", "show"]:
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(response))
+        return host.run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ControlPlaneError):
+        bootstrap(settings)
+    assert not host.rules
+
+
+def test_key_creation_race_preserves_winning_identity(setup, monkeypatch):
+    settings, host = setup
+    host.generated = OTHER
+    link = os.link
+
+    def race(source, destination):
+        if destination.name == "server_private.key":
+            destination.write_text(PRIVATE + "\n")
+        link(source, destination)
+
+    monkeypatch.setattr(os, "link", race)
+    bootstrap(settings)
+    assert (settings.data_dir / "server_private.key").read_text().strip() == PRIVATE
+    assert host.public_key == PUBLIC
+    assert not list(settings.data_dir.glob(".bootstrap-*"))
+
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink"])
+def test_key_file_must_be_regular_and_not_a_symlink(setup, kind):
+    settings, host = setup
+    path = settings.data_dir / "server_private.key"
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        target = settings.data_dir / "target"
+        target.write_text(PRIVATE)
+        path.symlink_to(target)
+    with pytest.raises(ControlPlaneError):
+        bootstrap(settings)
+    assert not host.calls
+
+
+@pytest.mark.parametrize("stage", ["file", "directory"])
+def test_fsync_failure_is_safe_cleans_temp_and_allows_retry(setup, monkeypatch, stage):
+    settings, host = setup
+    fsync = os.fsync
+
+    def fail(descriptor):
+        is_directory = os.fstat(descriptor).st_mode & 0o170000 == 0o040000
+        if is_directory == (stage == "directory"):
+            raise OSError(PRIVATE)
+        fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail)
+    with pytest.raises(ControlPlaneError) as error:
+        bootstrap(settings)
+    assert PRIVATE not in str(error.value)
+    assert not host.calls
+    assert not list(settings.data_dir.glob(".bootstrap-*"))
+    monkeypatch.setattr(os, "fsync", fsync)
+    bootstrap(settings)
+    assert host.public_key == PUBLIC
+
+
+def test_invalid_generated_key_is_never_persisted(setup):
+    settings, host = setup
+    host.generated = "not-a-key"
+    with pytest.raises(ControlPlaneError):
+        bootstrap(settings)
+    assert not (settings.data_dir / "server_private.key").exists()
+
+
+def test_corrupt_identity_manifest_prevents_mutation(setup):
+    settings, host = setup
+    (settings.data_dir / "bootstrap.json").write_text("corrupt")
     with pytest.raises(ControlPlaneError):
         bootstrap(settings)
     assert not host.calls

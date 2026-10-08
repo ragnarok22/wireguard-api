@@ -137,7 +137,7 @@ def bootstrap(settings: Settings) -> None:
     commands = _Commands(settings.command_timeout)
     private, public = _identity(settings, commands)
     interface = settings.interface
-    links = commands.json(["ip", "-j", "link", "show"])
+    links = commands.json(["ip", "-j", "-details", "link", "show"])
     selected = [link for link in links if link.get("ifname") == interface]
     if selected:
         info = selected[0].get("linkinfo")
