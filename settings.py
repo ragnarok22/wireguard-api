@@ -17,7 +17,9 @@ def interface_name(value: str) -> str:
 
 
 class Settings(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(
+        frozen=True, extra="forbid", allow_inf_nan=False, hide_input_in_errors=True
+    )
 
     api_token: SecretStr
     server_endpoint: str

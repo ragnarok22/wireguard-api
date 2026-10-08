@@ -46,6 +46,42 @@ def test_reject_empty_or_default_tokens(token: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "values,secret,field",
+    [
+        (
+            {"api_token": "diagnostic-secret-marker"},
+            "diagnostic-secret-marker",
+            "server_endpoint",
+        ),
+        (
+            {
+                "api_token": "default_token_change_me",
+                "server_endpoint": "node.example.org",
+            },
+            "default_token_change_me",
+            "api_token",
+        ),
+        (
+            {
+                "api_token": "diagnostic-secret-marker",
+                "server_endpoint": "vpn.example.com",
+            },
+            "diagnostic-secret-marker",
+            "server_endpoint",
+        ),
+    ],
+)
+def test_startup_validation_diagnostics_never_disclose_token(
+    values: dict[str, str], secret: str, field: str
+) -> None:
+    with pytest.raises(ValidationError) as error:
+        Settings.model_validate(values)
+    diagnostic = str(error.value)
+    assert field in diagnostic
+    assert secret not in diagnostic
+
+
+@pytest.mark.parametrize(
     ("endpoint", "expected"),
     [
         ("NODE.Example.ORG", "node.example.org:51820"),
