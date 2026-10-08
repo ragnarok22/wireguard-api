@@ -791,9 +791,9 @@ each failure must block the HTTP listener and permit recovery with the same
 volume. The suite has a 300-second deadline and removes its containers and volumes.
 
 The traffic smoke runner creates disposable server/client/target containers,
-networking, and a
-volume; checks authentication, `/v1` contracts, configuration templates, probes,
-metrics, and applies the API-returned client configuration with `wg-quick`;
+networking, and a volume; checks authentication, `/v1` contracts, configuration
+templates, probes and metrics; applies the API-returned client configuration with
+`wg-quick`;
 checks a real WireGuard handshake, full-tunnel routing, configured DNS, and
 tunneled HTTP traffic/NAT using a controlled DNS/HTTP target on a separate network;
 checks stats/rates and CPU/RAM inside a server limited to 0.5 CPU and 256 MiB;
@@ -853,9 +853,9 @@ check; the actual VPN/DNS traffic checks use controlled local targets.
   Newer known stable tags suppress older aliases even if not yet published;
   build metadata does not affect SemVer precedence.
 - Publication runs quality/container checks, pushes the multi-platform image
-  to Docker Hub and GHCR, and runs bootstrap, smoke and lifecycle tests against the exact
-  published digest natively on amd64 and arm64 before promoting eligible moving
-  aliases and creating the GitHub release. Docker Hub uses `DOCKER_USERNAME` /
+  to Docker Hub and GHCR, and runs bootstrap, smoke and lifecycle tests against
+  the exact published digest natively on amd64 and arm64 before promoting eligible
+  moving aliases and creating the GitHub release. Docker Hub uses `DOCKER_USERNAME` /
   `DOCKER_TOKEN`; GHCR and releases use `GITHUB_TOKEN`.
 - Actions and Docker base images are pinned. Enable the
   [Renovate GitHub app](https://github.com/apps/renovate) to activate weekly
