@@ -17,8 +17,10 @@ ready-to-import WireGuard configs.
 - [Deployment](#deployment)
 - [Configuration](#configuration)
 - [Upgrading an existing deployment](#upgrading-an-existing-deployment)
+- [Compatibility policy](#compatibility-policy)
 - [Usage](#usage)
 - [Health and monitoring](#health-and-monitoring)
+- [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Contributors](#contributors)
 
@@ -52,6 +54,12 @@ are not supported or exposed.
 - Your VPN UDP port allowed through the host/cloud firewall.
 - `NET_ADMIN` for the container. Hosts needing explicit kernel module loading
   can additionally grant `SYS_MODULE` and mount `/lib/modules`.
+
+Run one container/process owner per node and persistent directory. `service_run`
+starts bootstrap followed by Uvicorn with **one worker**; use the same model for
+direct application deployments. The interprocess storage lock serializes mutations,
+but does not make multiple reconcilers, wg-quick, or another manager supported
+owners of the same interface.
 
 The included Compose file binds the management API to **`127.0.0.1` by default**.
 Use an SSH tunnel or a restricted HTTPS reverse proxy for remote management.
@@ -100,10 +108,11 @@ and uses `/readyz` for its health check.
 
 The token is loaded at process startup. To rotate it, replace `API_TOKEN` in
 your private `.env` (or deployment secret), then recreate the service so the new
-environment is applied:
+environment is applied. Update the effective source: an exported `API_TOKEN`
+overrides the Compose `.env` value. Keep the file restricted to `0600`.
 
 ```bash
-docker compose up -d --force-recreate app
+docker compose up -d --no-build --force-recreate app
 curl --fail-with-body http://127.0.0.1:8008/readyz
 ```
 
@@ -380,6 +389,89 @@ while preserving their public keys, addresses and server identity. For storage
 failures, keep the damaged data, restore a verified checkpoint, and retry with
 the correct writable mount/schema; do not recover by deleting the key/database
 or replacing an unreadable inventory with an empty one.
+
+## Compatibility policy
+
+Starting with the stable **1.0.0** release, existing clients using the documented
+`/v1` contract can upgrade through stable 1.x releases without changing their
+requests or interpretation of existing responses. The current pre-1.0 refactor
+has the [breaking migration](#supported-paths-and-storage-compatibility) described
+above; publishing this policy does not change the project version or declare
+1.0.0 released. Prereleases are evaluation builds and can change before the final
+stable contract is published.
+
+### Compatible and incompatible changes
+
+| Release | Permitted changes |
+| --- | --- |
+| Patch (`1.x.y`) | Bug/security fixes restoring documented behavior, performance improvements, and documentation corrections that preserve the public contract. |
+| Minor (`1.y.0`) | Backward-compatible features: new endpoints, optional request parameters with defaults preserving existing behavior, and additional response fields or metrics. Deprecations may be announced without removing behavior. |
+| Major (`2.0.0` onward) | Incompatible API, configuration, deployment, or persistence changes, accompanied by migration instructions. Incompatible management API semantics use a new prefix such as `/v2`. |
+
+The protected contract includes:
+
+- Endpoint methods/paths, authentication via `X-API-Token`, documented HTTP
+  outcomes, JSON media types, and the `code`/`detail` error envelope. Existing
+  error codes retain their meaning; `detail` is human-readable and its exact
+  wording is not a machine interface.
+- Existing field names, types, nullability, timestamp/counter units, UUID peer
+  and operation identifiers, and `items`/`next_cursor` pagination using `after`.
+- Creation validation, duplicate/conflict handling, and persisted idempotency:
+  matching retries return the original identity without credentials; different
+  requests and revoked originals conflict. A `202` is durable pending work, not
+  success; completion is verified, and cancellation is not successful creation.
+- One-time generated credentials and `Cache-Control: no-store`, retained
+  operation history, and address reservation until verified revocation.
+- The documented public probe schemas/readiness semantics, metric names/labels/
+  units and unavailable-value conventions, and client configuration routing.
+
+Removing or renaming an existing endpoint/field/metric, changing a field's type
+or nullability, changing units or identifier representation, requiring a new
+request field/header, or tightening validation to reject previously documented
+valid requests is incompatible. Adding values to an existing closed enum (for
+example peer states or operation statuses) is also incompatible. Changing
+idempotency, credential delivery, success/error semantics, existing defaults,
+or the node's ownership/routing policy requires a major release. Rejecting
+undocumented invalid inputs or correcting behavior that contradicts the contract
+is a bug fix; release notes must describe any operational impact.
+
+Clients must ignore unknown response fields, avoid depending on JSON field order,
+and handle documented null/unavailable values. Requests must still use only
+documented fields; creation rejects unknown fields. For example, adding an
+optional server response field is compatible, while replacing a UUID with a
+public key or treating a pending creation as complete is not.
+
+### Deprecation and breaking-change announcements
+
+Announce a deprecation in a minor release's `CHANGELOG.md` entry and GitHub release
+notes, and update this README and the affected OpenAPI documentation (`deprecated`
+where supported). Each notice must identify the affected feature, first deprecated
+version, replacement, migration examples, and earliest major release planned for
+removal. If no replacement exists, explicitly explain the migration constraint.
+
+Deprecated behavior remains supported throughout 1.x; deprecation alone does not
+change its response, validation, or side effects. Removal cannot occur in a patch
+or minor release. A breaking major release must enumerate changes and provide
+before/after requests, deployment/storage migration steps, supported upgrade
+paths, and backup/rollback constraints. It must explain whether the previous API
+prefix remains available and for how long; coexistence is not implied by `/v2`.
+
+### Product, API, and storage versions
+
+`pyproject.toml` is the authoritative product version, exposed in OpenAPI,
+health and runtime responses and validated against the release tag. `/v1` is the
+management contract generation, not the full product version. SQLite's
+`metadata.version` is a storage-format identifier, not either API or product
+SemVer.
+
+Stable 1.x upgrades must preserve existing desired state and server identity.
+Any storage migration needs explicit release documentation and verified forward
+upgrade/recovery coverage; internal schema changes do not by themselves create
+a new API generation. A compatible API does **not** guarantee an older image can
+read a newer database. Use the documented
+[storage compatibility](#supported-paths-and-storage-compatibility),
+[offline backup](#consistent-offline-backups), and [rollback](#rollback-procedure)
+procedures, and pin an exact image version/digest when deploying.
 
 ## Usage
 
