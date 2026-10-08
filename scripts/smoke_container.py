@@ -71,7 +71,7 @@ class DockerCommandError(RuntimeError):
 
 def docker(*args: str, input_text: str | None = None, timeout: float = 30) -> str:
     try:
-        return subprocess.run(
+        result = subprocess.run(
             ["docker", *args],
             input=input_text,
             check=True,
@@ -79,7 +79,9 @@ def docker(*args: str, input_text: str | None = None, timeout: float = 30) -> st
             text=True,
             timeout=timeout,
             shell=False,
-        ).stdout.rstrip("\n")
+        )
+        output = result.stdout + result.stderr if args[0] == "logs" else result.stdout
+        return output.rstrip("\n")
     except subprocess.CalledProcessError as exc:
         raise DockerCommandError(
             f"Docker {args[0]} failed with exit code {exc.returncode}"
