@@ -310,8 +310,10 @@ class BootstrapSmoke:
                 "from pathlib import Path; "
                 "(Path('/source') / 'server_private.key').chmod(0o644)",
             )
+            old_token, self.token = self.token, uuid.uuid4().hex
             self.start(volume, token=self.token)
             self.ready()
+            assert self.request("/v1/peers", old_token) == 403
             assert (
                 self.command("exec", self.server, "wg", "show", "wg0", "public-key")
                 == public

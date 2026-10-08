@@ -360,6 +360,43 @@ def test_invalid_generated_key_is_never_persisted(setup):
     assert not (settings.data_dir / "server_private.key").exists()
 
 
+@pytest.mark.parametrize("stage", ["file", "directory"])
+def test_private_key_publication_is_private_and_cleans_up_on_failure(
+    setup, monkeypatch, stage
+):
+    settings, host = setup
+    fsync = os.fsync
+    inspected = False
+    key_file = settings.data_dir / "server_private.key"
+
+    def fail(descriptor):
+        nonlocal inspected
+        for temporary in settings.data_dir.glob(".bootstrap-*"):
+            if temporary.read_text().strip() == PRIVATE:
+                info = temporary.stat()
+                assert info.st_mode & 0o777 == 0o600
+                assert info.st_uid == os.geteuid()
+                assert info.st_gid == os.getegid()
+                inspected = True
+        is_directory = os.fstat(descriptor).st_mode & 0o170000 == 0o040000
+        if inspected and is_directory == (stage == "directory"):
+            raise OSError(PRIVATE)
+        fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail)
+    with pytest.raises(ControlPlaneError) as error:
+        bootstrap(settings)
+    assert inspected, "Must inspect the key-bearing file before publication cleanup"
+    assert PRIVATE not in str(error.value)
+    assert not list(settings.data_dir.glob(".bootstrap-*"))
+    assert key_file.exists() == (stage == "directory")
+    assert not any(command[:2] == ["wg", "set"] for command, _ in host.calls)
+    monkeypatch.setattr(os, "fsync", fsync)
+    bootstrap(settings)
+    assert key_file.read_text().strip() == PRIVATE
+    assert host.public_key == PUBLIC
+
+
 def test_corrupt_identity_manifest_prevents_mutation(setup):
     settings, host = setup
     (settings.data_dir / "bootstrap.json").write_text("corrupt")

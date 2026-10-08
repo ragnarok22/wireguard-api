@@ -81,6 +81,11 @@ required, with no fallback token or endpoint. The old token
 `default_token_change_me` and the hostname `vpn.example.com` are intentionally
 rejected. Keep `.env` private and outside Git.
 
+Generate a unique token with `openssl rand -hex 32`, put it in `API_TOKEN`, and
+restrict the environment file with `chmod 600 .env`. Missing, empty,
+whitespace-only, and old default tokens block application startup. Validation
+errors identify the invalid setting without printing its supplied value.
+
 ```bash
 docker compose up -d --build
 docker compose logs app
@@ -90,6 +95,27 @@ curl --fail-with-body http://127.0.0.1:8008/readyz
 Readiness returns HTTP `200` with `"status": "ready"` when storage and the
 WireGuard peer inventory converge. Compose mounts `./config` at `WG_DATA_DIR`
 and uses `/readyz` for its health check.
+
+### Rotating the API token
+
+The token is loaded at process startup. To rotate it, replace `API_TOKEN` in
+your private `.env` (or deployment secret), then recreate the service so the new
+environment is applied:
+
+```bash
+docker compose up -d --force-recreate app
+curl --fail-with-body http://127.0.0.1:8008/readyz
+```
+
+`docker compose restart` alone does not apply changed environment variables.
+For a `docker run` deployment, remove and recreate the container with the updated
+`--env-file` and the same persistent data mount. Update management clients to
+send the new token: it must return `200` on `GET /v1/peers`; the previous token
+must return `403`, and an omitted header still returns `401`. There is no
+overlap period for old and new tokens. Recreation briefly interrupts VPN
+traffic while the interface and peers are restored; server and peer identities
+remain unchanged with the same data directory. `/livez`, `/readyz`, and
+`/metrics` remain public.
 
 ### Published images
 
@@ -157,6 +183,22 @@ values take precedence. Compose passes the application settings below.
 `SERVER_PUBLIC_KEY` is no longer an override: configurations use the public key
 observed on the interface. Changing the interface or server address/pool on an
 existing volume requires an explicit migration, not just an environment change.
+
+Container bootstrap supports an exclusive IPv4 WireGuard interface with one
+usable server address in a `/16`–`/30` pool. Choose a pool that does not overlap
+your container/egress networks. An existing interface must have the expected
+type, address and server key; foreign or conflicting interfaces block startup.
+The host must provide WireGuard support, and the container must have `NET_ADMIN`
+and IPv4 forwarding enabled (as in the included Compose file).
+
+The egress interface must exist in the container's network namespace. Automatic
+discovery uses the route to `1.1.1.1` without sending traffic; set
+`WG_EGRESS_INTERFACE` explicitly for a topology requiring a different exit.
+Bootstrap checks forwarding and installs pool-scoped masquerade plus outbound
+and established-return forwarding rules on every run. Missing rules are repaired
+without duplicates. Essential command failures prevent the API from starting;
+s6 can keep the container running while retrying the failed service, so use
+readiness and service logs to assess startup.
 
 ### Persistent data
 
@@ -732,18 +774,32 @@ WireGuard backends and temporary storage, without privileged networking.
 make deployment-check
 docker build --check .  # Included in deployment-check; useful standalone
 docker build -t wireguard-api:smoke .
+make bootstrap-check
 python3 scripts/smoke_container.py wireguard-api:smoke
 ```
 
 The smoke runner requires Python 3.10+ and Docker on a WireGuard-capable Linux
-host. It creates disposable server/client/target containers, networking, and a
+host. `make bootstrap-check` runs `scripts/smoke_bootstrap.py` against `IMAGE`
+(default `wireguard-api:smoke`). It checks Compose's required token, negative
+application startup with missing/empty/whitespace/default tokens, secret-free
+diagnostics, default `wg0` readiness with automatic egress discovery, token
+rotation, server-key permissions/ownership and temporary-file cleanup, permission
+repair with stable identity, restart/recreation and repeatable firewall setup.
+Test-only command wrappers inject failures into key generation/derivation,
+interface creation/address/key/link setup, forwarding and firewall checks/writes;
+each failure must block the HTTP listener and permit recovery with the same
+volume. The suite has a 300-second deadline and removes its containers and volumes.
+
+The traffic smoke runner creates disposable server/client/target containers,
+networking, and a
 volume; checks authentication, `/v1` contracts, configuration templates, probes,
 metrics, and applies the API-returned client configuration with `wg-quick`;
 checks a real WireGuard handshake, full-tunnel routing, configured DNS, and
 tunneled HTTP traffic/NAT using a controlled DNS/HTTP target on a separate network;
 checks stats/rates and CPU/RAM inside a server limited to 0.5 CPU and 256 MiB;
 then recreates the server and verifies persistence, deletion, and preserved
-server identity. Finally, it revokes the connected client while continuous HTTP
+server identity, repaired `0600` key permissions and no leaked temporary key files.
+Finally, it revokes the connected client while continuous HTTP
 requests are running, requires repeated failures with no recovered access, and
 checks that the target remains available. It has a 300-second overall deadline
 and cleans up its containers, both networks, and volume on success or failure.
@@ -784,7 +840,8 @@ check; the actual VPN/DNS traffic checks use controlled local targets.
 ### CI, publishing, and dependency updates
 
 - Pull requests and pushes to `main` run Python checks and native amd64/arm64
-  builds, smoke tests, and upgrade/backup/rollback lifecycle checks. Coverage XML
+  builds, bootstrap rejection/repair checks, smoke tests, and
+  upgrade/backup/rollback lifecycle checks. Coverage XML
   is uploaded as an artifact.
 - Release tags must be exact SemVer `vMAJOR.MINOR.PATCH`, optionally with
   prerelease/build metadata, and match `project.version` in `pyproject.toml`
@@ -796,7 +853,7 @@ check; the actual VPN/DNS traffic checks use controlled local targets.
   Newer known stable tags suppress older aliases even if not yet published;
   build metadata does not affect SemVer precedence.
 - Publication runs quality/container checks, pushes the multi-platform image
-  to Docker Hub and GHCR, and runs smoke and lifecycle tests against the exact
+  to Docker Hub and GHCR, and runs bootstrap, smoke and lifecycle tests against the exact
   published digest natively on amd64 and arm64 before promoting eligible moving
   aliases and creating the GitHub release. Docker Hub uses `DOCKER_USERNAME` /
   `DOCKER_TOKEN`; GHCR and releases use `GITHUB_TOKEN`.
