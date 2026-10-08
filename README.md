@@ -1,158 +1,74 @@
 # wireguard-api
 
-VPN node based in Wireguard with a RESTful API exposed to manage peers.
-
-**What you get**
-- FastAPI service that manages WireGuard peers over HTTP.
-- Auto IP allocation when `allowed_ips` are omitted.
-- Peers persisted to `/config/peers.json` and restored on startup.
-- Public `/health` and `/metrics` endpoints for probes and Prometheus.
-- Docker/Compose flow that bootstraps `wg0`, NAT, and IP forwarding for you.
+**A self-hosted WireGuard VPN server with a REST API for managing clients.**
+Create, inspect, and remove WireGuard peers over HTTP, or generate a client
+configuration ready to import into a WireGuard app. The Docker image combines
+WireGuard with a FastAPI service, so you can automate VPN access without
+manually editing server configuration files.
 
 [![Tests](https://github.com/ragnarok22/wireguard-api/actions/workflows/tests.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/tests.yml)
 [![Publish images and release](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-## Deployment on AWS (Critical)
-> [!IMPORTANT]
-> Disable **Source/destination check** on the EC2 instance or routing will fail:
-> 1. AWS Console → EC2 → Instances → select instance.
-> 2. Actions → Networking → Change source/destination check.
-> 3. Uncheck the box and save.
+## Contents
 
-**Security Groups**
-- UDP `51820`: inbound from `0.0.0.0/0` (WireGuard).
-- TCP `8008`: inbound only from your management IP (API access).
+- [Features](#features)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Contributors](#contributors)
+- [Deployment](#deployment)
+- [Usage](#usage)
 
-### Run with Docker Compose (recommended)
+## Features
 
-```bash
-git clone https://github.com/ragnarok22/wireguard-api.git
-cd wireguard-api
-API_TOKEN=your_token \
-SERVER_ENDPOINT=vpn.example.com:51820 \
-docker compose up --build
-```
+- **Peer management:** list, create, inspect, and delete VPN clients through a
+  token-authenticated API. A *peer* is a device or client connected to WireGuard.
+- **Automatic setup:** generate client keys and allocate an available IPv4
+  address when creating a peer, or supply your own public key and addresses.
+- **Client configuration:** create a peer and download its WireGuard
+  configuration in a single request.
+- **Persistent state:** save peers and the server key under `/config`, and
+  restore peers when the service starts.
+- **Monitoring:** public health checks and Prometheus metrics for HTTP requests,
+  peer counts, traffic, and handshakes.
 
-What this does
-- Builds the app image with pinned `uv` and linuxserver/wireguard images, using Alpine's Python 3.14 runtime.
-- Boots `wg0` at `10.13.13.1/24`, enables NAT + IP forwarding, and restores peers from `/config/peers.json`.
-- Exposes UDP `51820` (WireGuard) and TCP `8008` (API).
-
-### Run with Docker
-
-```bash
-docker run -d \
-    --name=wireguard_api \
-    --cap-add=NET_ADMIN \
-    --cap-add=SYS_MODULE \
-    -e API_TOKEN=your_secret_token \
-    -e SERVER_ENDPOINT=vpn.yourdomain.com:51820 \
-    -e SERVER_PUBLIC_KEY="server_public_key" \
-    -e WG_INTERFACE=wg0 \
-    -p 51820:51820/udp \
-    -p 8008:8008 \
-    -v /lib/modules:/lib/modules \
-    -v $(pwd)/config:/config \
-    --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
-    --sysctl="net.ipv4.ip_forward=1" \
-    --restart unless-stopped \
-    ghcr.io/ragnarok22/wireguard-api:latest
-```
-
-Release images are published to both `ghcr.io/ragnarok22/wireguard-api` and
-`docker.io/ragnarok22/wireguard-api` for `linux/amd64` and `linux/arm64`. Stable
-releases provide full version tags (such as `0.5.0`), major/minor tags (such as
-`0.5`), and `latest`. Prereleases receive their full version tag only. Use a full
-version tag to select a specific release.
+On a fresh deployment, the container creates `wg0` at `10.13.13.1/24`, listens
+for VPN connections on UDP `51820`, and configures IPv4 forwarding and NAT so
+clients can reach the internet. The API listens separately on TCP `8008`.
 
 ## Configuration
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `API_TOKEN` | Yes | – | Shared secret for `X-API-Token` auth on peer endpoints. |
-| `SERVER_ENDPOINT` | No | `vpn.example.com:51820` | Host:port shown in generated client configs. Missing port is auto-filled to `51820`. |
-| `SERVER_PUBLIC_KEY` | No | Fetched from interface | Server pubkey used in configs; if unset we call `wg show <interface> public-key`. |
-| `WG_INTERFACE` | No | `wg0` | WireGuard interface the API manages. |
-| `VPN_PORT` | No | `51820` | Host-mapped WireGuard UDP port. The container listens on `51820`; set `SERVER_ENDPOINT` to the externally reachable port. |
-| `API_PORT` | No | `8008` | Host-mapped API port. The app still listens on `8008` in-container. |
+Set runtime options through environment variables. Docker Compose also reads
+the `.env` file in the project directory.
 
-**Persistence**
-- Peers are stored in `/config/peers.json`; mount `/config` to persist across restarts.
-- `service_run` also keeps the server private key at `/config/server_private.key`.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `API_TOKEN` | No application default | Shared secret required in the `X-API-Token` header for peer operations. Set a strong, unique value. |
+| `SERVER_ENDPOINT` | `vpn.example.com:51820` | Public hostname or IP and UDP port placed in client configurations. Replace this with your server's reachable address. A hostname or IPv4 address without a port gets `:51820` appended. |
+| `SERVER_PUBLIC_KEY` | Read from the interface | Optional override for the server public key placed in client configurations. |
+| `WG_INTERFACE` | `wg0` | Existing WireGuard interface managed by the API. The container bootstrap creates `wg0`; changing this variable does not create a different interface. |
+| `VPN_PORT` | `51820` | Compose-only host UDP port mapped to the container's `51820`. Match this port in `SERVER_ENDPOINT`. |
+| `API_PORT` | `8008` | Compose-only host TCP port mapped to the container's `8008`. |
 
-## Usage
+The included Compose file has a fallback token of `default_token_change_me`;
+replace it before deployment. Leave `SERVER_PUBLIC_KEY` unset to use the actual
+key from the running WireGuard interface.
 
-Base URL defaults to `http://localhost:8008` (inside container it always listens on `8008`).
-Peer operations require `X-API-Token: <API_TOKEN>`.
+### Persistent data
 
-### List Peers
-```bash
-curl -X GET http://localhost:8008/peers \
-  -H "X-API-Token: your_secret_token"
-```
+Mount a persistent directory or volume at `/config` to retain:
 
-### Create Peer
-```bash
-curl -X POST http://localhost:8008/peers \
-  -H "X-API-Token: your_secret_token" \
-  -H "Content-Type: application/json" \
-  -d '{"allowed_ips": ["10.13.13.2/32"]}'
-```
-*If `public_key` is omitted, one will be generated.*
-*If `allowed_ips` is omitted, the next available IP in the subnet will be automatically allocated.*
+| File | Contents |
+| --- | --- |
+| `/config/peers.json` | Peer public keys and assigned addresses, restored on startup. |
+| `/config/server_private.key` | The server private key created by the container bootstrap. |
 
-### Create Peer (One-Liner Config)
-To generate a ready-to-use WireGuard configuration file directly:
-```bash
-curl -X POST "http://localhost:8008/peers?format=config" \
-  -H "X-API-Token: your_secret_token" \
-  -H "Content-Type: application/json" \
-  -d '{}' > client.conf
-```
-
-### Get Peer Details
-```bash
-curl -X GET http://localhost:8008/peers/<PUBLIC_KEY> \
-  -H "X-API-Token: your_secret_token"
-```
-
-### Get Peer Config
-Returns a partial config block for the client.
-```bash
-curl -X GET http://localhost:8008/peers/<PUBLIC_KEY>/config \
-  -H "X-API-Token: your_secret_token"
-```
-
-### Delete Peer
-```bash
-curl -X DELETE http://localhost:8008/peers/<PUBLIC_KEY> \
-  -H "X-API-Token: your_secret_token"
-```
-
-### Health (no auth)
-```bash
-curl http://localhost:8008/health | jq
-```
-Sample response:
-```json
-{
-  "status": "healthy",
-  "version": "0.4.2",
-  "uptime_seconds": 12.3,
-  "wireguard_interface": "wg0",
-  "wireguard_available": true,
-  "peer_count": 0
-}
-```
-
-### Prometheus Metrics (no auth)
-```
-curl http://localhost:8008/metrics
-```
-Exposes request metrics (`wireguard_api_requests_total`, `wireguard_api_request_duration_seconds`) and WireGuard stats (`wireguard_peers_total`, `wireguard_peer_transfer_rx_bytes`, `wireguard_peer_transfer_tx_bytes`, `wireguard_peer_last_handshake_seconds`). Scrape interval of 15–30s is typical.
+Client private keys generated by the API are returned only when a peer is
+created; they are not saved in `peers.json`. Keep the creation response or
+downloaded client configuration if you need to connect that client later.
 
 ## Development
 
@@ -161,6 +77,7 @@ and requires Python 3.14+. Development and CI use the stable interpreter pinned
 in `.python-version`; uv can download it automatically.
 
 ### Prerequisites
+
 - `uv` 0.12.23 or newer
 - `make`
 - Docker with a WireGuard-capable Linux kernel for container smoke tests
@@ -171,6 +88,7 @@ the project's uv version without changing your installed binary, pass
 `UV="uv tool run --from uv==0.12.23 uv"` to make.
 
 ### Commands
+
 ```bash
 make install       # Sync the committed lockfile
 make run           # Run uvicorn at http://127.0.0.1:8008 with reload
@@ -183,10 +101,11 @@ make coverage      # Run branch coverage; also writes coverage.xml
 make check         # Lint, formatting, types, and tests
 ```
 
-The 100-test unit suite covers **100% of statements and branches** in `api.py`,
-`health.py`, `metrics.py`, and `wireguard.py`. The coverage floor is **100%**.
-Tests use fake WireGuard instances and temporary storage, so the unit suite
-does not need privileged networking.
+The coverage floor is **100% of statements and branches** in `api.py`,
+`health.py`, `metrics.py`, and `wireguard.py`. Unit tests use fake WireGuard
+instances and temporary storage, so they do not need privileged networking.
+Running peer operations locally requires a configured WireGuard interface and
+permission to manage it; `make run` starts only the API.
 
 ### Container checks
 
@@ -221,7 +140,7 @@ To refresh dependencies deliberately, update the ranges in `pyproject.toml`,
 run `uv lock --upgrade`, then run `make check` and `make coverage` before
 building and smoke-testing the image.
 
-## Contributors ✨
+## Contributors
 
 Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
 
@@ -240,3 +159,257 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+
+Licensed under the [MIT License](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for
+release history.
+
+## Deployment
+
+### Requirements
+
+- A Linux host with WireGuard kernel support and Docker installed.
+- Docker Compose for the recommended setup, plus Git to clone the repository.
+- A public hostname or IP reachable by your VPN clients.
+- UDP `51820` (or your chosen VPN port) allowed through the host/cloud firewall.
+- TCP `8008` (or your chosen API port) accessible only to your management clients.
+
+The container uses `NET_ADMIN` to manage networking. The examples also grant
+`SYS_MODULE` and mount `/lib/modules` for hosts that need to load kernel modules.
+Use HTTPS through a reverse proxy when accessing the API over an untrusted
+network, since peer creation can return client private keys.
+
+### Docker Compose (recommended)
+
+**1. Clone the repository.**
+
+```bash
+git clone https://github.com/ragnarok22/wireguard-api.git
+cd wireguard-api
+```
+
+**2. Create a `.env` file in the project directory.** Replace the token with a
+strong, unique secret and the endpoint with your server's public address.
+
+```dotenv
+API_TOKEN=replace-with-a-strong-unique-secret
+SERVER_ENDPOINT=vpn.example.com:51820
+API_PORT=8008
+VPN_PORT=51820
+```
+
+If you change `VPN_PORT`, use that same port in `SERVER_ENDPOINT`. Keep `.env`
+private; it is ignored by Git.
+
+**3. Build and start the service.**
+
+```bash
+docker compose up -d --build
+docker compose logs app
+```
+
+Compose builds the image locally, publishes the API and VPN ports, and mounts
+`./config` at `/config` to preserve peers and the server key across restarts.
+
+**4. Check that WireGuard is ready.**
+
+```bash
+curl --fail-with-body http://localhost:8008/health
+```
+
+A healthy service returns HTTP `200` with `"status": "healthy"`. Adjust the URL
+if you changed `API_PORT`. You can now [create a client configuration](#create-a-client-configuration).
+
+### Docker (published image)
+
+To use a prebuilt image, create the `.env` file shown above in your working
+directory and run:
+
+```bash
+docker run -d \
+  --name wireguard_api \
+  --cap-add NET_ADMIN \
+  --cap-add SYS_MODULE \
+  --env-file .env \
+  -p 51820:51820/udp \
+  -p 8008:8008/tcp \
+  -v /lib/modules:/lib/modules \
+  -v "$(pwd)/config:/config" \
+  --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+  --sysctl net.ipv4.ip_forward=1 \
+  --restart unless-stopped \
+  ghcr.io/ragnarok22/wireguard-api:latest
+```
+
+With `docker run`, change the host side of each `-p` mapping to customize ports;
+`API_PORT` and `VPN_PORT` in `.env` are only used for port mapping by Compose.
+
+Images are published for **`linux/amd64` and `linux/arm64`** to:
+
+- `ghcr.io/ragnarok22/wireguard-api`
+- `docker.io/ragnarok22/wireguard-api`
+
+Stable releases provide full version tags (such as `0.5.0`), major/minor tags
+(such as `0.5`), and `latest`. Prereleases receive their full version tag only.
+Use a full version tag to pin a deployment to a specific release.
+
+### AWS EC2 networking
+
+On EC2, disable **Source/destination check** on the VPN instance so it can
+forward client traffic:
+
+1. Open **EC2 → Instances** and select the instance.
+2. Choose **Actions → Networking → Change source/destination check**.
+3. Disable the check and save.
+
+In the instance's security group, allow inbound UDP on your VPN port from VPN
+clients (use `0.0.0.0/0` if clients connect from arbitrary IPv4 addresses).
+Allow inbound TCP on the API port only from your management IP or network.
+
+## Usage
+
+Run these examples on the server, or replace `localhost` with the API address
+reachable from your management machine. Set the token to the same value used
+in your deployment:
+
+```bash
+export API_URL="http://localhost:8008"
+export API_TOKEN="replace-with-your-deployment-token"
+```
+
+All `/peers` endpoints require the `X-API-Token` header. `/health` and `/metrics`
+are public. Interactive API documentation is available at
+`http://localhost:8008/docs`; use **Authorize** to enter your token.
+
+### Endpoint reference
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/peers` | List peers and their current WireGuard statistics. |
+| `POST` | `/peers` | Create a peer; return JSON with its key and addresses. |
+| `POST` | `/peers?format=config` | Create a peer; return a full client configuration as plain text. |
+| `GET` | `/peers/{public_key}` | Inspect one peer. |
+| `GET` | `/peers/{public_key}/config` | Return JSON containing a partial client configuration. |
+| `DELETE` | `/peers/{public_key}` | Remove a peer from WireGuard and persistent storage. |
+| `GET` | `/health` | Check service and WireGuard availability. |
+| `GET` | `/metrics` | Read Prometheus metrics. |
+
+### Create a client configuration
+
+This is the quickest way to connect a new client. The API generates a key pair,
+assigns an available address, adds the peer, and returns its configuration:
+
+```bash
+umask 077
+curl --fail-with-body -X POST "$API_URL/peers?format=config" \
+  -H "X-API-Token: $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}' -o client.conf
+```
+
+After the request succeeds, import `client.conf` into your WireGuard client and
+activate the tunnel. Keep the file private: it contains the client's private
+key. This request creates a new peer each time it is run.
+
+The generated configuration uses DNS `1.1.1.1`, routes `0.0.0.0/0, ::/0` through
+the tunnel, and sets a 25-second keepalive. The default container bootstrap
+configures IPv4 forwarding and NAT; IPv6 routing needs additional server setup.
+
+### Create a peer with a JSON response
+
+```bash
+curl --fail-with-body -X POST "$API_URL/peers" \
+  -H "X-API-Token: $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Example response (HTTP `201`; keys shown as placeholders):
+
+```json
+{
+  "public_key": "<generated-public-key>",
+  "allowed_ips": ["10.13.13.2/32"],
+  "private_key": "<generated-private-key>"
+}
+```
+
+To supply your own key or address, include either or both fields in the body:
+
+```json
+{
+  "public_key": "<your-client-public-key>",
+  "allowed_ips": ["10.13.13.10/32"]
+}
+```
+
+Choose an unused address in the VPN subnet. If `public_key` is omitted, the API
+generates a key pair and returns the private key once. If `allowed_ips` is
+omitted, it allocates an available address automatically. When supplying your
+own public key, use the JSON response format and keep your private key on the
+client; full configuration generation requires the API to generate the keys.
+
+### List and inspect peers
+
+```bash
+curl --fail-with-body "$API_URL/peers" \
+  -H "X-API-Token: $API_TOKEN"
+```
+
+Use a peer's `public_key` from the list or creation response for individual
+operations:
+
+```bash
+export PUBLIC_KEY="replace-with-the-peer-public-key"
+
+curl --fail-with-body "$API_URL/peers/$PUBLIC_KEY" \
+  -H "X-API-Token: $API_TOKEN"
+
+curl --fail-with-body "$API_URL/peers/$PUBLIC_KEY/config" \
+  -H "X-API-Token: $API_TOKEN"
+```
+
+The config endpoint returns JSON with a `config` string containing the server's
+`[Peer]` block. To build a full client configuration, add an `[Interface]` block
+with the client's private key and assigned address. This endpoint does not
+recover a previously generated private key.
+
+### Delete a peer
+
+```bash
+curl --fail-with-body -X DELETE "$API_URL/peers/$PUBLIC_KEY" \
+  -H "X-API-Token: $API_TOKEN"
+```
+
+A successful deletion returns HTTP `204` with no response body. Inspecting or
+deleting a peer that does not exist returns HTTP `404`.
+
+### Health and monitoring
+
+```bash
+curl --fail-with-body "$API_URL/health"
+curl --fail-with-body "$API_URL/metrics"
+```
+
+The health endpoint returns HTTP `200` when WireGuard is available and HTTP
+`503` otherwise. Example healthy response:
+
+```json
+{
+  "status": "healthy",
+  "version": "0.4.2",
+  "uptime_seconds": 12.3,
+  "wireguard_interface": "wg0",
+  "wireguard_available": true,
+  "peer_count": 0
+}
+```
+
+Configure Prometheus to scrape `/metrics`, typically every 15–30 seconds. The
+endpoint exposes:
+
+- `wireguard_api_requests_total`
+- `wireguard_api_request_duration_seconds`
+- `wireguard_peers_total`
+- `wireguard_peer_transfer_rx_bytes`
+- `wireguard_peer_transfer_tx_bytes`
+- `wireguard_peer_last_handshake_seconds`
