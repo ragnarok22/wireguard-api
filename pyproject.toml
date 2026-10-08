@@ -52,6 +52,7 @@ files = [
     "storage_lock.py", "legacy.py", "settings.py", "models.py", "service.py",
     "errors.py", "keys.py", "configuration.py", "version.py", "bootstrap.py",
     "scripts/release_metadata.py",
+    "stats.py", "cgroups.py", "system_info.py", "telemetry.py",
 ]
 strict = true
 
@@ -61,6 +62,7 @@ source = [
     "api", "routes", "health", "metrics", "wireguard", "storage", "storage_lock",
     "legacy", "settings", "models", "service", "errors", "keys", "configuration",
     "version", "bootstrap", "scripts.release_metadata",
+    "stats", "cgroups", "system_info", "telemetry",
 ]
 
 [tool.coverage.report]

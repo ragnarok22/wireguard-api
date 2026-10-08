@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY api.py routes.py health.py metrics.py wireguard.py storage.py settings.py \
     models.py service.py errors.py keys.py configuration.py version.py bootstrap.py \
-    storage_lock.py legacy.py ./
+    storage_lock.py legacy.py stats.py cgroups.py system_info.py telemetry.py ./
 COPY --chmod=755 service_run /etc/services.d/api/run
 
 EXPOSE 51820/udp 8008/tcp

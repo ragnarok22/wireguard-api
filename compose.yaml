@@ -31,6 +31,7 @@ services:
       WG_COMMAND_TIMEOUT: ${WG_COMMAND_TIMEOUT:-5}
       WG_RECONCILE_INTERVAL: ${WG_RECONCILE_INTERVAL:-5}
       WG_SNAPSHOT_TTL: ${WG_SNAPSHOT_TTL:-1}
+      WG_TELEMETRY_INTERVAL: ${WG_TELEMETRY_INTERVAL:-1}
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:8008/readyz"]
       interval: 10s

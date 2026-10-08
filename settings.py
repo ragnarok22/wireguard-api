@@ -30,6 +30,7 @@ class Settings(BaseModel):
     command_timeout: float = Field(default=5, gt=0, le=60)
     reconcile_interval: float = Field(default=5, gt=0, le=300)
     snapshot_ttl: float = Field(default=1, ge=0, le=30)
+    telemetry_interval: float = Field(default=1, ge=0.1, le=30)
 
     @field_validator("api_token")
     @classmethod
@@ -102,6 +103,7 @@ class Settings(BaseModel):
             "command_timeout": "WG_COMMAND_TIMEOUT",
             "reconcile_interval": "WG_RECONCILE_INTERVAL",
             "snapshot_ttl": "WG_SNAPSHOT_TTL",
+            "telemetry_interval": "WG_TELEMETRY_INTERVAL",
         }
         return cls.model_validate(
             {

@@ -20,6 +20,7 @@ from routes import build_router
 from service import PeerService
 from settings import Settings
 from storage import Store
+from telemetry import Telemetry
 from version import VERSION
 from wireguard import WireGuard
 
@@ -40,7 +41,9 @@ async def reconciliation_loop(service: PeerService, stop: asyncio.Event) -> None
 
 
 def create_app(
-    settings: Settings | None = None, service: PeerService | None = None
+    settings: Settings | None = None,
+    service: PeerService | None = None,
+    telemetry: Telemetry | None = None,
 ) -> FastAPI:
     configured = settings or (
         service.settings if service is not None else Settings.load()
@@ -58,23 +61,32 @@ def create_app(
         )
     node = service
     collector = Metrics()
+    sampler = telemetry or Telemetry(node)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await run_in_threadpool(node.initialize)
+        await run_in_threadpool(sampler.sample_system)
+        await run_in_threadpool(sampler.sample_vpn)
         stop = asyncio.Event()
         task = asyncio.create_task(reconciliation_loop(node, stop))
+        sampling_tasks = [
+            asyncio.create_task(sampler.loop(component, stop))
+            for component in ("vpn", "system")
+        ]
         try:
             yield
         finally:
             stop.set()
             await task
+            await asyncio.gather(*sampling_tasks)
 
     app = FastAPI(title="WireGuard API", version=VERSION, lifespan=lifespan)
     app.state.service = node
     app.state.metrics = collector
+    app.state.telemetry = sampler
     app.add_middleware(MetricsMiddleware, metrics=collector)
-    app.include_router(build_router(node))
+    app.include_router(build_router(node, sampler))
 
     @app.exception_handler(ControlPlaneError)
     async def control_error(request: Request, exc: ControlPlaneError) -> JSONResponse:

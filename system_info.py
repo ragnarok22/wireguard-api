@@ -24,6 +24,10 @@ class SystemCollector:
         except OSError:
             self.os_name = platform.system()
 
+    def reset(self) -> None:
+        self._previous = None
+        self._last_sample = None
+
     def sample(self) -> SystemInfo:
         resources = self.reader.read()
         now = time.monotonic()

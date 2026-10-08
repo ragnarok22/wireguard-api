@@ -17,12 +17,15 @@ from models import (
     PeerPage,
     PeerView,
     ServerView,
+    SystemInfo,
+    VpnStats,
 )
 from service import PeerService
 from storage import OperationRecord
+from telemetry import Telemetry
 
 
-def build_router(service: PeerService) -> APIRouter:
+def build_router(service: PeerService, telemetry: Telemetry) -> APIRouter:
     scheme = APIKeyHeader(name="X-API-Token", auto_error=False)
 
     async def authenticate(token: Annotated[str | None, Depends(scheme)]) -> None:
@@ -111,6 +114,19 @@ def build_router(service: PeerService) -> APIRouter:
     @router.get("/server", response_model=ServerView, tags=["server"])
     def server() -> ServerView:
         return service.server()
+
+    @router.get("/stats", response_model=VpnStats, tags=["statistics"])
+    def stats(
+        response: Response,
+        handshake_window_seconds: Annotated[int, Query(ge=1, le=3600)] = 180,
+    ) -> VpnStats:
+        response.headers["Cache-Control"] = "no-store"
+        return telemetry.stats(handshake_window_seconds)
+
+    @router.get("/system", response_model=SystemInfo, tags=["statistics"])
+    def system(response: Response) -> SystemInfo:
+        response.headers["Cache-Control"] = "no-store"
+        return telemetry.system()
 
     @router.get(
         "/operations/{operation_id}",
