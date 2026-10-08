@@ -326,6 +326,7 @@ def smoke_test(image: str) -> None:
 
         wait_for(resources_ready, "container resource sampling")
         info = json.loads(request("/v1/system")[1])
+        assert info["runtime"]["api_version"] == product_version
         assert (
             info["status"] == "available" and info["resource_scope"] == "current_cgroup"
         )

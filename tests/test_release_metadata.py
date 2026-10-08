@@ -1,5 +1,6 @@
 """Release identity, strict SemVer, and monotonic Docker alias policy."""
 
+import json
 import os
 import re
 import runpy
@@ -209,6 +210,93 @@ def test_promotion_and_release_require_successful_native_verification():
     assert "platform: linux/amd64" in verify
     assert "platform: linux/arm64" in verify
     assert "${{ needs.publish.outputs.digest }}" in verify
+    assert "registry: [ghcr, docker-hub]" in verify
+    assert "needs.metadata.outputs.hub_image" in verify
+    assert "needs.metadata.outputs.ghcr_image" in verify
+    assert "EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}" in verify
+    assert "EXPECTED_REVISION: ${{ github.sha }}" in verify
+    assert "EXPECTED_PLATFORM: ${{ matrix.platform }}" in verify
+
+
+@pytest.mark.parametrize("version", ["0.9.0", "0.9.0-rc.1", "0.9.0+build.1"])
+def test_release_notes_select_exact_version_and_preserve_migration_notes(version):
+    changelog = (
+        "# Changelog\n\n## [Unreleased]\n\nUpcoming\n\n"
+        f"## [{version}] - 2026-10-08\n\n"
+        "### Breaking changes\nUse /v1 and preserve the server key.\n\n"
+        "## [0.4.2] - 2026-01-25\n\nPrevious release\n"
+    )
+    assert release_metadata.release_notes(changelog, version) == (
+        "### Breaking changes\nUse /v1 and preserve the server key."
+    )
+
+
+@pytest.mark.parametrize(
+    "changelog",
+    [
+        "# Changelog\n## [Unreleased]\nNot versioned",
+        "## [0.9.0-rc.1]\nOther release notes",
+        "## [0.9.0]\n\n## [0.4.2]\nOlder release notes",
+        "## [0.9.0]\n\nLast release notes\n",
+    ],
+)
+def test_missing_notes_block_release_and_final_entry_is_supported(changelog):
+    if "Last release" in changelog:
+        assert release_metadata.release_notes(changelog, "0.9.0") == (
+            "Last release notes"
+        )
+    else:
+        with pytest.raises(ValueError, match="Missing release notes"):
+            release_metadata.release_notes(changelog, "0.9.0")
+
+
+@pytest.mark.parametrize(
+    "architectures,success", [(["amd64", "arm64"], True), (["amd64"], False)]
+)
+def test_published_manifests_require_both_native_architectures(
+    architectures, success, tmp_path
+):
+    script = dedent(
+        publishing_job("publish")
+        .split("      - name: Verify the published index exists in both registries", 1)[
+            1
+        ]
+        .split("        run: |\n", 1)[1]
+    )
+    index = {
+        "manifests": [
+            {"platform": {"os": "linux", "architecture": architecture}}
+            for architecture in architectures
+        ]
+        + [{"platform": {"os": "unknown", "architecture": "unknown"}}]
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            'docker() { if [[ "$*" == *--raw ]]; then printf "%s\\n" "$INDEX_JSON"; '
+            'else printf "%s\\n" "$*"; fi; }\n' + script,
+        ],
+        env={
+            **os.environ,
+            "DIGEST": "sha256:" + "a" * 64,
+            "GHCR_IMAGE": "ghcr.io/example/wireguard-api",
+            "HUB_IMAGE": "example/wireguard-api",
+            "INDEX_JSON": json.dumps(index),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=False,
+    )
+    assert (result.returncode == 0) is success
+    if success:
+        assert "ghcr.io/example/wireguard-api@sha256:" in result.stdout
+        assert " example/wireguard-api@sha256:" in result.stdout
 
 
 @pytest.mark.parametrize(

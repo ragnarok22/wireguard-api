@@ -1195,6 +1195,41 @@ check; the actual VPN/DNS traffic checks use controlled local targets.
   [Renovate GitHub app](https://github.com/apps/renovate) to activate weekly
   dependency/lockfile maintenance in `renovate.json`.
 
+### Publishing prerequisites and release verification
+
+Configure repository Actions secrets `DOCKER_USERNAME` and `DOCKER_TOKEN` for
+an account with push access to `ragnarok22/wireguard-api` on Docker Hub. GHCR uses
+the workflow's `GITHUB_TOKEN`; the repository must permit package publication,
+and an existing GHCR package must grant the repository access. GitHub release
+creation requires the workflow's `contents: write` permission. Native amd64 and
+arm64 GitHub-hosted runners must be available. The workflow logs in to each
+registry; no developer-local registry credentials are required for publication.
+
+Before tagging, update `pyproject.toml`, run `uv lock` without dependency
+upgrades, and add a nonempty entry for that exact version in `CHANGELOG.md`.
+Review the changelog's breaking changes and migration instructions, then run
+`make check`, `make coverage`, deployment and container checks. Push an annotated
+`vMAJOR.MINOR.PATCH` tag only after the intended release commit is ready. Tag
+publication invokes the workflow automatically; do not create a GitHub release
+manually ahead of image verification.
+
+For example, `v0.9.0-rc.1` publishes only `0.9.0-rc.1` in both registries and
+creates a GitHub prerelease after successful verification. It leaves `latest`,
+`0`, `0.9` and older stable aliases untouched. Eligible final `v0.9.0` publishes
+`0.9.0`, then promotes `0`, `0.9` and `latest` to its verified digest. `0.4`
+remains on the newest known stable 0.4 release. Pre-1.0 releases can contain
+breaking changes; use an exact version/digest and review migration instructions.
+
+Publication asserts that both registry indexes contain linux/amd64 and
+linux/arm64. Four native verification jobs pull the exact digest independently
+from Docker Hub and GHCR on each architecture and run bootstrap, peer/persistence,
+real handshake/DNS/HTTP/NAT and upgrade/restore/rollback checks. The smoke runner
+checks product, OpenAPI, health and runtime versions; published-image checks also
+require OCI version/revision labels and the expected architecture. GitHub release
+notes include the exact changelog entry before automatically generated notes.
+Record workflow URLs, tested digests and pre/post alias comparisons in the release
+validation issue. Promotion and release creation require all four jobs to pass.
+
 To refresh dependencies deliberately, update the ranges in `pyproject.toml`,
 run `uv lock --upgrade`, then run `make check` and `make coverage` before
 deployment checks, building, and smoke-testing the image.
