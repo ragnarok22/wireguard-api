@@ -26,10 +26,14 @@ jobs:
       - name: Validate release identity and semantic prerelease status
         id: metadata
         run: python3 -m scripts.release_metadata >> "$GITHUB_OUTPUT"
+      - name: Extract versioned migration and release notes
+        run: |
+          python3 -c 'from pathlib import Path; from scripts.release_metadata import release_notes; from version import VERSION; print(release_notes(Path("CHANGELOG.md").read_text(), VERSION))' > "$RUNNER_TEMP/release-notes.md"
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
+          body_path: ${{ runner.temp }}/release-notes.md
           draft: false
           prerelease: ${{ inputs.prerelease || steps.metadata.outputs.prerelease == 'true' }}
           make_latest: ${{ !inputs.prerelease && steps.metadata.outputs.latest_enabled == 'true' && 'true' || 'false' }}

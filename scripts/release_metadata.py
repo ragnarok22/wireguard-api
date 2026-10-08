@@ -106,5 +106,17 @@ def main() -> None:
     print("\n".join(f"{key}={value}" for key, value in metadata.items()))
 
 
+def release_notes(changelog: str, version: str) -> str:
+    """Require a nonempty changelog entry for the exact product version."""
+    match = re.search(
+        rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\Z)",
+        changelog,
+        re.M | re.S,
+    )
+    if match is None or not match[1].strip():
+        raise ValueError(f"Missing release notes for {version}")
+    return match[1].strip()
+
+
 if __name__ == "__main__":
     main()

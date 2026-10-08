@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      version: ${{ steps.release.outputs.version }}
       immutable_tag: ${{ steps.release.outputs.immutable_tag }}
       major_tag: ${{ steps.release.outputs.major_tag }}
       minor_tag: ${{ steps.release.outputs.minor_tag }}
@@ -85,6 +86,9 @@ jobs:
             ${{ needs.metadata.outputs.hub_image }}
             ${{ needs.metadata.outputs.ghcr_image }}
           flavor: latest=false
+          labels: |
+            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: |
             type=raw,value=${{ needs.metadata.outputs.immutable_tag }}
       - name: Build and push multi-platform images
@@ -105,8 +109,11 @@ jobs:
           GHCR_IMAGE: ${{ needs.metadata.outputs.ghcr_image }}
         run: |
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools inspect "$GHCR_IMAGE@$DIGEST"
-          docker buildx imagetools inspect "$HUB_IMAGE@$DIGEST"
+          for image in "$GHCR_IMAGE" "$HUB_IMAGE"; do
+            docker buildx imagetools inspect "$image@$DIGEST"
+            docker buildx imagetools inspect "$image@$DIGEST" --raw |
+              python3 -c 'import json, sys; m=json.load(sys.stdin); p={(x["platform"]["os"], x["platform"]["architecture"]) for x in m["manifests"]}; assert {("linux", "amd64"), ("linux", "arm64")} <= p, p'
+          done
           {
             printf '## Published multi-platform index\n\n'
             printf '* GHCR: %s@%s\n' "$GHCR_IMAGE" "$DIGEST"
@@ -114,7 +121,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify:
-    name: Verify published image (${{ matrix.platform }})
+    name: Verify published image (${{ matrix.registry }}, ${{ matrix.platform }})
     needs: [metadata, publish]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -124,6 +131,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        registry: [ghcr, docker-hub]
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
@@ -136,15 +145,25 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Log in to GHCR
+        if: matrix.registry == 'ghcr'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub
+        if: matrix.registry == 'docker-hub'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
       - name: Pull and smoke-test the exact published bytes
         env:
-          IMAGE: ${{ needs.metadata.outputs.ghcr_image }}@${{ needs.publish.outputs.digest }}
+          IMAGE: ${{ matrix.registry == 'ghcr' && needs.metadata.outputs.ghcr_image || needs.metadata.outputs.hub_image }}@${{ needs.publish.outputs.digest }}
           PLATFORM: ${{ matrix.platform }}
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
           docker pull --platform "$PLATFORM" "$IMAGE"
           make bootstrap-check IMAGE="$IMAGE"
@@ -165,7 +184,7 @@ jobs:
           fi
       - name: Verify lifecycle of the exact published bytes
         env:
-          IMAGE: ${{ needs.metadata.outputs.ghcr_image }}@${{ needs.publish.outputs.digest }}
+          IMAGE: ${{ matrix.registry == 'ghcr' && needs.metadata.outputs.ghcr_image || needs.metadata.outputs.hub_image }}@${{ needs.publish.outputs.digest }}
         run: |
           make lifecycle-check IMAGE="$IMAGE"
           printf '* Published image upgrade/restore/rollback passed: %s\n' \

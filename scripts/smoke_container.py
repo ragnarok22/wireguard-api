@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -168,6 +169,11 @@ def smoke_test(image: str) -> None:
     def wait_ready() -> None:
         wait_for(lambda: request("/readyz", auth=None)[0] == 200, "readiness")
         assert request("/livez", auth=None)[0] == 200
+        for path in ("/livez", "/readyz"):
+            assert json.loads(request(path, auth=None)[1])["version"] == product_version
+        assert json.loads(request("/openapi.json", auth=None)[1])["info"][
+            "version"
+        ] == product_version
         command("exec", name, "wg", "show", "wgtest")
         command("exec", name, "python", "-c", SERVER_KEY_CHECK)
 
@@ -243,6 +249,21 @@ def smoke_test(image: str) -> None:
         platform = command(
             "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"
         )
+        product_version = command(
+            "run", "--rm", "--platform", platform, "--network", "none",
+            "--entrypoint", "python", image, "-c",
+            "from version import VERSION; print(VERSION)",
+        )
+        if expected_version := os.environ.get("EXPECTED_VERSION"):
+            assert product_version == expected_version, "Published product version mismatch"
+            labels = json.loads(
+                command("image", "inspect", image, "--format", "{{json .Config.Labels}}")
+            )
+            assert labels["org.opencontainers.image.version"] == expected_version
+            assert labels["org.opencontainers.image.revision"] == os.environ[
+                "EXPECTED_REVISION"
+            ]
+            assert platform == os.environ["EXPECTED_PLATFORM"], "Wrong native architecture"
         command("volume", "create", volume)
         command("network", "create", network)
         command("network", "create", egress_network)
