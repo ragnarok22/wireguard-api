@@ -57,4 +57,4 @@ source = ["api", "health", "metrics", "wireguard"]
 [tool.coverage.report]
 show_missing = true
 precision = 2
-fail_under = 81.9
+fail_under = 100

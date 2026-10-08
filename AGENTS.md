@@ -17,7 +17,7 @@
 - `make lint` / `make format-check`: Ruff lint and formatting validation.
 - `make format`: Ruff formatting and automatic fixes.
 - `make typecheck`: Strict mypy checks for application modules.
-- `make test` / `make coverage`: Unit tests and branch coverage with XML output; coverage must meet the measured 81.9% baseline floor.
+- `make test` / `make coverage`: Unit tests and branch coverage with XML output; all application statements and branches must meet the 100% coverage floor.
 - `make check`: Lint, formatting, types, and tests.
 - For an older installed uv binary, pass `UV="uv tool run --from uv==0.12.23 uv"` to make.
 - Container flow: `API_TOKEN=changeme API_PORT=8008 VPN_PORT=51820 docker compose up --build`.

@@ -183,7 +183,8 @@ make coverage      # Run branch coverage; also writes coverage.xml
 make check         # Lint, formatting, types, and tests
 ```
 
-The coverage floor is **81.9%**, based on the measured **81.91%** baseline.
+The 100-test unit suite covers **100% of statements and branches** in `api.py`,
+`health.py`, `metrics.py`, and `wireguard.py`. The coverage floor is **100%**.
 Tests use fake WireGuard instances and temporary storage, so the unit suite
 does not need privileged networking.
 

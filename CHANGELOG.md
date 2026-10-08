@@ -13,7 +13,8 @@ All notable changes to this project will be documented in this file.
 - **Documentation**: Update development commands and repository guidelines for the current peer-management API.
 
 ### Added
-- **Quality checks**: Strict mypy checks, centralized pytest configuration, and branch coverage reporting with an 81.9% baseline floor.
+- **Quality checks**: Strict mypy checks, centralized pytest configuration, and branch coverage reporting with a 100% coverage floor.
+- **Unit coverage**: Expand the suite to 100 tests covering all application statements and branches, including startup recovery, API errors and configuration, subprocess failures, key generation, and persistence edge cases. Isolate API tests from local `.env` files and `/config`.
 - **Container verification**: Smoke tests for real WireGuard operations, authentication, monitoring, configuration generation, and persistence after restart.
 - **Dependency maintenance**: Renovate configuration for Python, lockfiles, GitHub Actions, and Docker images.
 - **Build context**: `.dockerignore` excludes local environment files, configuration, and development artifacts.

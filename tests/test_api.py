@@ -1,10 +1,11 @@
 import importlib
 import sys
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from wireguard import WireGuardError
+from wireguard import WireGuard, WireGuardError
 
 
 class FakeWireGuard:
@@ -19,6 +20,7 @@ class FakeWireGuard:
         delete_error: Exception | None = None,
         interface: str = "wg0",
         list_peers_error: Exception | None = None,
+        restore_error: Exception | None = None,
     ):
         self.peers = peers or {}
         self.gen_keys_return = gen_keys_return
@@ -29,8 +31,15 @@ class FakeWireGuard:
         self.delete_error = delete_error
         self.interface = interface
         self.list_peers_error = list_peers_error
+        self.restore_error = restore_error
+        self.restore_calls = 0
         self.created = []
         self.deleted = []
+
+    def restore_peers(self):
+        self.restore_calls += 1
+        if self.restore_error:
+            raise self.restore_error
 
     def list_peers(self):
         if self.list_peers_error:
@@ -68,7 +77,13 @@ class FakeWireGuard:
 
 @pytest.fixture()
 def api_module(monkeypatch):
+    # Do not load local secrets or initialize /config during unit tests.
+    monkeypatch.setattr("dotenv.load_dotenv", lambda: False)
+    monkeypatch.setattr("wireguard.WireGuard", Mock(return_value=FakeWireGuard()))
     monkeypatch.setenv("API_TOKEN", "secret-token")
+    monkeypatch.setenv("WG_INTERFACE", "wg0")
+    monkeypatch.delenv("SERVER_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("SERVER_ENDPOINT", raising=False)
     if "api" in sys.modules:
         del sys.modules["api"]
     return importlib.import_module("api")
@@ -367,3 +382,231 @@ def test_metrics_includes_peer_transfer_metrics(client, api_module):
     content = response.text
     assert "wireguard_peer_transfer_rx_bytes" in content
     assert "wireguard_peer_transfer_tx_bytes" in content
+
+
+def test_startup_restores_peers_before_serving_requests(api_module):
+    fake = FakeWireGuard(peers={"existing": {}})
+    api_module.wg = fake
+
+    with TestClient(api_module.app) as client:
+        assert fake.restore_calls == 1
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["peer_count"] == 1
+
+    assert fake.restore_calls == 1
+
+
+def test_startup_restore_failure_is_logged_and_service_still_starts(api_module, caplog):
+    fake = FakeWireGuard(restore_error=WireGuardError("storage unavailable"))
+    api_module.wg = fake
+
+    with TestClient(api_module.app) as client:
+        assert client.get("/health").status_code == 200
+
+    assert fake.restore_calls == 1
+    assert "Failed to restore peers on startup" in caplog.text
+    assert "storage unavailable" in caplog.text
+
+
+def test_unhandled_exception_returns_generic_error_and_logs_cause(
+    api_module, auth_headers, caplog
+):
+    api_module.wg = FakeWireGuard(list_peers_error=RuntimeError("internal diagnostic"))
+
+    with TestClient(api_module.app, raise_server_exceptions=False) as client:
+        response = client.get("/peers", headers=auth_headers)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal Server Error"}
+    assert "internal diagnostic" not in response.text
+    assert "Unhandled exception: internal diagnostic" in caplog.text
+    error = next(record for record in caplog.records if record.levelname == "ERROR")
+    assert isinstance(error.exc_info[1], RuntimeError)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/peers"),
+        ("POST", "/peers"),
+        ("GET", "/peers/pub"),
+        ("DELETE", "/peers/pub"),
+        ("GET", "/peers/pub/config"),
+    ],
+)
+def test_peer_endpoints_require_authentication(client, api_module, method, path):
+    backend = Mock(spec=WireGuard)
+    api_module.wg = backend
+
+    response = client.request(method, path, json={} if method == "POST" else None)
+
+    assert response.status_code == 401
+    assert backend.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"public_key": 123}, {"allowed_ips": "10.0.0.2/32"}, {"allowed_ips": [123]}],
+)
+def test_invalid_create_payload_does_not_change_wireguard(
+    client, api_module, auth_headers, payload
+):
+    backend = Mock(spec=WireGuard)
+    api_module.wg = backend
+
+    response = client.post("/peers", headers=auth_headers, json=payload)
+
+    assert response.status_code == 422
+    assert backend.mock_calls == []
+
+
+def test_create_with_existing_public_key_does_not_generate_keys(
+    client, api_module, auth_headers
+):
+    fake = FakeWireGuard()
+    fake.gen_keys = Mock(side_effect=AssertionError("Must not generate keys"))
+    api_module.wg = fake
+
+    response = client.post(
+        "/peers",
+        headers=auth_headers,
+        json={"public_key": "existing", "allowed_ips": ["10.0.0.5/32"]},
+    )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "public_key": "existing",
+        "allowed_ips": ["10.0.0.5/32"],
+        "private_key": None,
+    }
+    fake.gen_keys.assert_not_called()
+    assert fake.created == [("existing", ["10.0.0.5/32"])]
+
+
+def test_auto_allocation_uses_existing_peer_addresses(
+    client, api_module, auth_headers, tmp_path
+):
+    fake = FakeWireGuard(
+        peers={
+            "peer1": {"allowed_ips": ["10.0.0.2/32", "10.0.0.3/32"]},
+            "peer2": {"allowed_ips": ["10.0.0.2/32"]},
+            "peer3": {},
+        }
+    )
+    allocator = WireGuard(storage_path=str(tmp_path / "peers.json"))
+    fake.allocate_next_ip = Mock(wraps=allocator.allocate_next_ip)
+    api_module.wg = fake
+
+    response = client.post("/peers", headers=auth_headers, json={})
+
+    assert response.status_code == 201
+    assert response.json()["allowed_ips"] == ["10.0.0.4/32"]
+    fake.allocate_next_ip.assert_called_once_with(
+        "10.0.0.1/24", {"10.0.0.2", "10.0.0.3"}
+    )
+    assert fake.created == [("pub", ["10.0.0.4/32"])]
+
+
+def test_auto_allocation_exhaustion_does_not_create_peer(
+    client, api_module, auth_headers
+):
+    fake = FakeWireGuard(next_ip=WireGuardError("No available IPs in subnet"))
+    api_module.wg = fake
+
+    response = client.post("/peers", headers=auth_headers, json={})
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "IP Allocation failed: No available IPs in subnet"
+    }
+    assert fake.created == []
+
+
+@pytest.mark.parametrize(
+    "create", [True, False], ids=["created-config", "partial-config"]
+)
+@pytest.mark.parametrize(
+    "configured_key", [True, False], ids=["env-key", "interface-key"]
+)
+def test_config_uses_configured_or_detected_server_key(
+    client, api_module, auth_headers, monkeypatch, create, configured_key
+):
+    fake = FakeWireGuard(peers={"pub": {}}, gen_keys_return=("private", "pub"))
+    fake._run = Mock(return_value="detected-key")
+    api_module.wg = fake
+    if configured_key:
+        monkeypatch.setenv("SERVER_PUBLIC_KEY", "configured-key")
+
+    if create:
+        response = client.post(
+            "/peers?format=config",
+            headers=auth_headers,
+            json={"allowed_ips": ["10.0.0.2/32"]},
+        )
+        assert response.status_code == 201
+        config = response.text
+    else:
+        response = client.get("/peers/pub/config", headers=auth_headers)
+        assert response.status_code == 200
+        config = response.json()["config"]
+
+    expected_key = "configured-key" if configured_key else "detected-key"
+    assert f"PublicKey = {expected_key}" in config
+    if configured_key:
+        fake._run.assert_not_called()
+    else:
+        fake._run.assert_called_once_with(["wg", "show", "wg0", "public-key"])
+
+
+@pytest.mark.parametrize(
+    "create", [True, False], ids=["created-config", "partial-config"]
+)
+def test_server_key_lookup_failure_is_logged_and_config_is_returned(
+    client, api_module, auth_headers, caplog, create
+):
+    api_module.wg = FakeWireGuard(
+        peers={"pub": {}}, run_result=WireGuardError("interface unavailable")
+    )
+
+    if create:
+        response = client.post(
+            "/peers?format=config",
+            headers=auth_headers,
+            json={"allowed_ips": ["10.0.0.2/32"]},
+        )
+        assert response.status_code == 201
+        config = response.text
+    else:
+        response = client.get("/peers/pub/config", headers=auth_headers)
+        assert response.status_code == 200
+        config = response.json()["config"]
+
+    assert "PublicKey = SERVER_PUB_KEY_PLACEHOLDER" in config
+    assert "Could not fetch server public key: interface unavailable" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        (None, "vpn.example.com:51820"),
+        ("vpn.example.com", "vpn.example.com:51820"),
+        ("203.0.113.10", "203.0.113.10:51820"),
+        ("vpn.example.com:15182", "vpn.example.com:15182"),
+        ("[2001:db8::1]:15182", "[2001:db8::1]:15182"),
+        # The helper only appends ports to domain/IPv4 hosts; IPv6 is passed through.
+        ("2001:db8::1", "2001:db8::1"),
+        ("[2001:db8::1]", "[2001:db8::1]"),
+    ],
+)
+def test_config_endpoint_defaults_and_preserves_explicit_values(
+    client, api_module, auth_headers, monkeypatch, endpoint, expected
+):
+    api_module.wg = FakeWireGuard(peers={"pub": {}}, run_result="server-key")
+    if endpoint is not None:
+        monkeypatch.setenv("SERVER_ENDPOINT", endpoint)
+
+    response = client.get("/peers/pub/config", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert f"Endpoint = {expected}" in response.json()["config"].splitlines()
