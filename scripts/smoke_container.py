@@ -117,6 +117,12 @@ def smoke_test(image: str) -> None:
             network,
             "--cap-add",
             "NET_ADMIN",
+            "--cpus",
+            "0.5",
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "256m",
             "--sysctl",
             "net.ipv4.conf.all.src_valid_mark=1",
             "--sysctl",
@@ -133,6 +139,8 @@ def smoke_test(image: str) -> None:
             "WG_RECONCILE_INTERVAL=0.25",
             "--env",
             "WG_SNAPSHOT_TTL=0.1",
+            "--env",
+            "WG_TELEMETRY_INTERVAL=0.25",
             "--mount",
             f"type=volume,source={volume},target=/config",
             image,
@@ -157,6 +165,30 @@ def smoke_test(image: str) -> None:
         )
         assert request("/v1/peers", auth=None)[0] == 401
         assert request("/v1/peers", auth="invalid")[0] == 403
+        for path in ("/v1/stats", "/v1/system"):
+            assert request(path, auth=None)[0] == 401
+            assert request(path, auth="invalid")[0] == 403
+
+        def resources_ready() -> bool:
+            status, content = request("/v1/system")
+            if status != 200:
+                return False
+            info = json.loads(content)
+            return info["cpu"]["status"] == "available"
+
+        wait_for(resources_ready, "container resource sampling")
+        info = json.loads(request("/v1/system")[1])
+        assert (
+            info["status"] == "available" and info["resource_scope"] == "current_cgroup"
+        )
+        assert info["cpu"]["capacity_cores"] == 0.5
+        assert info["cpu"]["total_usage_seconds"] > 0
+        assert info["cpu"]["usage_percent"] >= 0
+        assert info["memory"]["limit_bytes"] == 256 * 1024 * 1024
+        assert info["memory"]["capacity_bytes"] == 256 * 1024 * 1024
+        assert 0 < info["memory"]["used_bytes"] < info["memory"]["limit_bytes"]
+        assert info["disk"]["scope"] == "data_filesystem"
+        assert info["sample"]["age_seconds"] < 3
         assert json.loads(request("/v1/peers")[1]) == {"items": [], "next_cursor": None}
         server_key = json.loads(request("/v1/server")[1])["public_key"]
         assert server_key == command("exec", name, "wg", "show", "wgtest", "public-key")
@@ -218,6 +250,16 @@ def smoke_test(image: str) -> None:
             )
 
         wait_for(metrics_ready, "fresh available peer metrics")
+
+        def vpn_stats_ready() -> bool:
+            status, content = request("/v1/stats")
+            return status == 200 and json.loads(content)["peers"]["applied"] == 2
+
+        wait_for(vpn_stats_ready, "VPN summary sampling")
+        stats = json.loads(request("/v1/stats")[1])
+        assert stats["peers"]["registered"] == 2
+        assert stats["pool"]["reserved"] == 2
+        assert stats["pending_operations"] == 0
 
         # Both helpers use the same tested image but bypass /init/bootstrap.
         command(
@@ -293,6 +335,22 @@ def smoke_test(image: str) -> None:
             return source == server_ip
 
         wait_for(nat_traffic, "tunnel HTTP traffic and subnet-scoped NAT", 30)
+
+        def traffic_rates_ready() -> bool:
+            assert nat_traffic()
+            status, content = request("/v1/stats")
+            if status != 200:
+                return False
+            info = json.loads(content)
+            rates = info["traffic"]
+            return (
+                info["handshakes"]["recent"] >= 1
+                and rates["rx_bytes_per_second"] is not None
+                and rates["rx_bytes_per_second"] > 0
+                and rates["tx_bytes_per_second"] > 0
+            )
+
+        wait_for(traffic_rates_ready, "measured tunnel traffic rates", 15)
         handshakes = command("exec", name, "wg", "show", "wgtest", "latest-handshakes")
         assert any(
             line.split()[0] == public_key and int(line.split()[1]) > 0
@@ -316,7 +374,8 @@ def smoke_test(image: str) -> None:
         assert request(external_path)[0] == 404
         assert json.loads(request(path)[1])["public_key"] == public_key
         print(
-            "API, recreate/persistence, handshake, tunnel traffic and NAT passed: "
+            "API, limited-container resources, VPN rates, recreation, "
+            "handshake, tunnel traffic and NAT passed: "
             f"{image}"
         )
     except Exception:

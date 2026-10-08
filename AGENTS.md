@@ -7,6 +7,7 @@
 - `wireguard.py`: Typed, timeout-bounded subprocess adapter and observations; `bootstrap.py`: sole container owner of interface, server identity, IPv4 forwarding, and NAT. `service_run`: bootstrap followed by the single-worker application factory.
 - `settings.py`: Explicit validated environment/`.env` loading; `models.py`: request/response contracts; `errors.py`: safe stable errors; `keys.py`: canonical key validation; `configuration.py`: full IPv4 client configuration/template rendering.
 - `health.py` and `metrics.py`: Storage/convergence readiness and per-application Prometheus collectors with bounded HTTP labels and explicit unavailable observations.
+- `stats.py`: VPN summaries and comparable per-peer traffic rates; `cgroups.py`: current-cgroup CPU/RAM and effective limits; `system_info.py`: resource/runtime composition; `telemetry.py`: independent background sampling with freshness-bounded caches.
 - `version.py`: Application `VERSION` read from `pyproject.toml`; `scripts/release_metadata.py`: exact SemVer validation and monotonic image-alias policy.
 - `pyproject.toml` and `uv.lock`: Python 3.14+ dependencies managed with uv; `.python-version` pins the development interpreter.
 - `Makefile`: Development, quality, coverage, and deployment-check targets. `Dockerfile` uses pinned uv/linuxserver images and Alpine's Python, disabling inherited wg-quick, module-loading, and CoreDNS owners.
@@ -39,6 +40,7 @@
 - The interface is exclusive and IPv4-only with a `/16`–`/30` pool. Remove unmanaged peers during reconciliation; do not share ownership with wg-quick or another manager. Client routing is only `0.0.0.0/0`; preshared keys are unsupported.
 - Preserve existing `server_private.key`; pin interface/address in `bootstrap.json` and database metadata. Interface/pool changes require explicit migration, not deletion of identity files. `/config/wg_confs` is neither a runtime controller nor an import source.
 - Readiness checks storage and fresh kernel convergence; runtime backend failures produce `503` readiness while liveness stays alive. Stable error bodies are `code`/`detail`, without submitted secrets or subprocess output.
+- `/v1/stats` and `/v1/system` require authentication and use independent sampled caches. Rates require two comparable monotonic samples; membership/identity changes and counter resets invalidate them. CPU/RAM use current-cgroup counters, respect visible limits, and never substitute host usage. Missing fields are null; stale/failed samples are unavailable. Include the new collector modules in typing/coverage and the limited-container smoke check.
 
 ## Coding Style & Naming Conventions
 - Ruff enforces line length 88, rulesets E,F,I,UP,B, and target version `py314`.

@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - **Documentation**: Document deployment migration, `/v1` examples, one-time credential handling, module responsibilities, and development/release checks while retaining the README introduction and contributor blocks.
 
 ### Added
+- **Node statistics**: Authenticated `/v1/stats` summarizes peers, handshakes, traffic counters/rates, pool capacity, and pending operations; `/v1/system` reports cgroup-aware CPU/RAM, data-filesystem usage, and runtime information. Independent background sampling exposes sample freshness and unavailable data explicitly.
 - **Durable storage and operations**: SQLite desired state, serialized allocation/kernel mutation, and persisted idempotency/operation history. Return `202` for accepted pending work, reconcile after interruptions, and retain operation history after revocation. Cancel a pending creation superseded by deletion rather than reporting successful creation.
 - **Legacy migration**: Automatically import an entire valid `peers.json` transactionally on initial storage setup, preserving the original. Require canonical public keys and unique usable IPv4 `/32` allocations inside the node pool; invalid legacy data blocks startup. SQLite becomes the sole source of truth after migration.
 - **Identity safeguards**: Preserve existing server keys with restrictive permissions and pin interface/address identity in `bootstrap.json` and storage metadata. Intentional interface/pool changes require explicit migration.

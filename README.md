@@ -149,6 +149,7 @@ values take precedence. Compose passes the application settings below.
 | `WG_COMMAND_TIMEOUT` | `5` | Subprocess timeout in seconds, greater than `0` and at most `60`. |
 | `WG_RECONCILE_INTERVAL` | `5` | Background reconciliation interval in seconds, greater than `0` and at most `300`. |
 | `WG_SNAPSHOT_TTL` | `1` | Observation cache lifetime in seconds, `0`–`30`; readiness forces a fresh observation. |
+| `WG_TELEMETRY_INTERVAL` | `1` | Independent VPN/system sampling interval in seconds, `0.1`–`30`. Samples older than `max(3, 3 × interval)` seconds are unavailable. |
 | `API_BIND` | `127.0.0.1` | Compose-only host address for the API port binding. |
 | `API_PORT` | `8008` | Compose-only host TCP port mapped to container `8008`. |
 | `VPN_PORT` | `51820` | Compose-only host UDP port mapped to `WG_LISTEN_PORT`. Use this host port in `SERVER_ENDPOINT`. |
@@ -237,6 +238,8 @@ OpenAPI documentation is available at `/docs` and `/redoc`, with the schema at
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/server` | Server public key, endpoint, interface, pool, and capacity/reservation counts. |
+| `GET` | `/v1/stats` | VPN peer counts, handshakes, current traffic counters/rates, pool capacity, and pending operations. |
+| `GET` | `/v1/system` | Current-cgroup CPU/RAM, data-filesystem usage, and runtime information. |
 | `GET` | `/v1/peers?limit=50&after=<UUID>` | Page through desired peers and kernel observations. |
 | `POST` | `/v1/peers` | Create a generated-key or external-key peer with `Idempotency-Key`. |
 | `GET` | `/v1/peers/{peer_id}` | Inspect a UUID peer, its state, and whether it is applied. |
@@ -457,6 +460,69 @@ needs retry returns `202` with its operation instead of claiming success.
 
 ## Health and monitoring
 
+### VPN statistics and container resources
+
+Both JSON endpoints require the management token and return `Cache-Control: no-store`:
+
+```bash
+curl --fail-with-body "$API_URL/v1/stats" -H "X-API-Token: $API_TOKEN"
+curl --fail-with-body "$API_URL/v1/system" -H "X-API-Token: $API_TOKEN"
+```
+
+`GET /v1/stats` returns:
+
+- `peers`: registered counts by `active`/`pending`/`deleting`, verified-applied,
+  observed, and unmanaged counts. A deleting peer still reserves its address.
+- `handshakes`: `recent`, `never`, `latest_at`, and `window_seconds`. The recent
+  window defaults to 180 seconds; set `?handshake_window_seconds=60` to change it
+  within `1`–`3600`. Recent handshakes indicate activity, not guaranteed connectivity.
+- `traffic`: `rx_bytes`, `tx_bytes`, `rx_bytes_per_second`, and
+  `tx_bytes_per_second`. RX is received by the server (client upload); TX is sent
+  by the server (client download). Scope is `current_interface`, including any
+  unmanaged peer awaiting reconciliation. Counters belong to currently installed
+  peers, can reset, and are not persisted historical totals.
+- `pool`: network, capacity, reserved addresses, and available addresses;
+  `pending_operations`, application version, and process uptime.
+
+Rates sum per-peer counter deltas over the measured monotonic interval. They are
+`null` in the first sample or after peer membership/identity changes, server-key
+changes, or detected counter resets. Two new comparable samples restore rates;
+an idle, unchanged interface reports zero. Polling the endpoint does not trigger
+sampling or alter the interval.
+
+`GET /v1/system` returns `resource_scope: "current_cgroup"`, plus:
+
+- `cpu`: cgroup v1/v2 source, effective `capacity_cores`, cumulative
+  `total_usage_seconds`, measured `used_cores`, and `usage_percent` relative to
+  that capacity. A Docker quota of 0.5 CPU means 0.5 fully consumed cores is 100%.
+  The first sample has status `warming_up` and a null percentage. Short quota
+  bursts can exceed 100% over a small sampling window.
+- `memory`: `used_bytes` (cgroup usage, including charged cache), configured
+  `limit_bytes`, effective `capacity_bytes`, and `usage_percent`. No configured
+  limit is represented by `null`; physical memory capacity can bound the effective
+  denominator without substituting host-wide usage.
+- `disk`: `scope: "data_filesystem"`, total/used/free bytes, and usage percentage
+  for the filesystem containing `WG_DATA_DIR`. This is filesystem capacity, not
+  the directory's size or a container disk quota.
+- `runtime`: OS, shared kernel, architecture, Python/API versions, and process uptime.
+
+CPU capacity respects process affinity and visible ancestor quotas. Memory respects
+visible ancestor limits. Limits hidden above a private cgroup namespace cannot be
+inspected. In Docker these counters normally describe the container and its
+processes; outside Docker they describe the application's current cgroup, not a
+host-wide fallback. Missing/unsupported resource data is `null` with system status
+`partial`; macOS development does not fabricate Linux container counters.
+
+Both responses include `sample.sampled_at` (Unix seconds), `age_seconds`, and
+`interval_seconds`. Sampling runs independently for VPN and system resources,
+outside the event loop, every `WG_TELEMETRY_INTERVAL` seconds. A failed VPN/storage
+observation invalidates the VPN sample and returns a safe `503`; stale samples and
+whole-system collector failures use `telemetry_unavailable`. System data and
+liveness stay available when the VPN collector fails. No sample is presented as
+an empty success or silently reused past its freshness limit.
+
+### Probes and Prometheus
+
 ```bash
 curl --fail-with-body "$API_URL/livez"
 curl --fail-with-body "$API_URL/readyz"
@@ -533,6 +599,9 @@ WireGuard backends and temporary storage, without privileged networking.
 - `settings.py`, `models.py`, `errors.py`, `keys.py`, and `configuration.py`:
   validated settings/contracts, safe errors, canonical keys, and client rendering.
 - `health.py` / `metrics.py`: readiness and per-application Prometheus collectors.
+- `stats.py`: VPN aggregation and counter rates; `cgroups.py`: current-cgroup CPU
+  and memory; `system_info.py`: resource/runtime composition; `telemetry.py`:
+  independent background samplers and freshness-bounded read caches.
 - `version.py`: `VERSION` read from `pyproject.toml`; `scripts/release_metadata.py`:
   release-tag validation and monotonic alias selection.
 
@@ -549,6 +618,7 @@ The smoke runner requires Python 3.10+ and Docker on a WireGuard-capable Linux
 host. It creates disposable server/client/target containers, networking, and a
 volume; checks authentication, `/v1` contracts, configuration templates, probes,
 metrics, a real WireGuard handshake, and tunneled HTTP traffic to a NAT target;
+checks stats/rates and CPU/RAM inside a server limited to 0.5 CPU and 256 MiB;
 then recreates the server and verifies persistence, deletion, and preserved
 server identity. It cleans up its resources. Application dependencies stay
 inside the image.
