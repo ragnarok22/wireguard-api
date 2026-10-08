@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-08
+
+Promotes the verified 0.9.0-rc.1 application to a non-prerelease 0.9.0 release.
+This remains pre-1.0 software: the documented stable 1.x compatibility guarantee
+starts with 1.0.0. Review the breaking upgrade from 0.4.2 before deploying.
+
+### Breaking changes since 0.4.2
+- **Management API**: Use authenticated `/v1` routes and UUID peer/operation IDs. Creation requires `key_mode` and `Idempotency-Key`; lists return `items` and `next_cursor`. Generated credentials are returned once; templates contain a private-key placeholder. Old unversioned/public-key routes are removed.
+- **Node ownership and routing**: One exclusive IPv4 WireGuard interface and `/16`–`/30` pool, with one `/32` per peer. Unmanaged peers are removed. Clients use `0.0.0.0/0`; IPv6 and preshared keys are unsupported. Inherited wg-quick/CoreDNS/module-loading owners are disabled; `/config/wg_confs` is not imported.
+- **Configuration and probes**: Explicit non-default `API_TOKEN` and real `SERVER_ENDPOINT` are required. Use public `/livez` and `/readyz` instead of `/health`. The handshake metric is now `wireguard_peer_last_handshake_timestamp_seconds`; unavailable data is distinguished from an empty inventory.
+- **Storage and runtime**: SQLite becomes the desired-state source, with strict all-or-nothing initial legacy JSON migration and preserved source files. Python 3.14+ is required.
+
+### Upgrade and recovery
+- Stop the old service and back up its **entire data directory**. Preserve `server_private.key`, match its interface and server address/pool, provision the required token/endpoint and update management clients to `/v1`.
+- Save one-time generated client credentials securely. After a lost response, replay only recovers identity: revoke that allocation and create a replacement with a new idempotency key.
+- The tested legacy upgrade is **v0.4.2 → v0.9.0**. Rollback requires the **pre-upgrade full-directory checkpoint and previous image**, never the migrated directory or stale JSON. Follow the [upgrade, backup and rollback procedures](https://github.com/ragnarok22/wireguard-api/blob/v0.9.0/README.md#upgrading-an-existing-deployment).
+
+### Added
+- Durable pending operations, idempotency history, verified reconciliation, cancellation and address reservation through revocation; preserved server identity with restrictive key permissions.
+- Authenticated `/v1/stats` and `/v1/system`, comparable VPN traffic rates, cgroup-aware CPU/RAM, sample freshness and explicit unavailable observations.
+- Native amd64/arm64 images in Docker Hub and GHCR; published-digest, version/OCI-label, bootstrap, real tunnel, persistence and upgrade/restore/rollback verification before alias promotion and release creation.
+- Secure deployment, token rotation, compatibility policy, operational troubleshooting and backup/restore/rollback documentation.
+
+### Fixed
+- Configuration validation no longer prints supplied tokens; command failures remain secret-free and block incomplete bootstrap.
+- Default/custom interface setup, key-permission repair and repeatable forwarding/NAT preserve identity across restart/recreation.
+- Kernel mutations report success only after verification. Replays never disclose generated credentials; conflicting/revoked requests return `409`. Stale/failed observations cannot masquerade as healthy empty inventories.
+
 ## [0.9.0-rc.1] - 2026-10-08
 
 This is an evaluation release candidate for 0.9.0, with breaking changes from
