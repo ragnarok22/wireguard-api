@@ -1,10 +1,8 @@
 # wireguard-api
 
-**A self-hosted WireGuard VPN server with a REST API for managing clients.**
-Create, inspect, and remove WireGuard peers over HTTP, or generate a client
-configuration ready to import into a WireGuard app. The Docker image combines
-WireGuard with a FastAPI service, so you can automate VPN access without
-manually editing server configuration files.
+**Your own WireGuard VPN, minus the config-file gymnastics.**
+Run it in Docker. Use the REST API to add, view, or remove clients and generate
+ready-to-import WireGuard configs.
 
 [![Tests](https://github.com/ragnarok22/wireguard-api/actions/workflows/tests.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/tests.yml)
 [![Publish images and release](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml/badge.svg)](https://github.com/ragnarok22/wireguard-api/actions/workflows/publish-docker.yml)
